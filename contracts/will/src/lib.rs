@@ -348,6 +348,8 @@ impl WillContract {
 
         will.balance += amount;
         storage::save_will(&env, &will);
+
+        events::top_up(&env, will_id, &owner, amount, will.balance);
     }
 
     /// Returns the full on-chain state of `will_id`.
