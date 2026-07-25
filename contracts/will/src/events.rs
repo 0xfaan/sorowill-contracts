@@ -17,7 +17,12 @@ pub fn will_created(
 ) {
     env.events().publish(
         (symbol_short!("created"), will_id),
-        (owner.clone(), balance, beneficiaries_count, checkin_deadline),
+        (
+            owner.clone(),
+            balance,
+            beneficiaries_count,
+            checkin_deadline,
+        ),
     );
 }
 
@@ -71,6 +76,10 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
         .publish((symbol_short!("benefup"), will_id), owner.clone());
 }
 
+/// Published when the owner updates the guardian list.
+pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("guardup"), will_id), owner.clone());
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(

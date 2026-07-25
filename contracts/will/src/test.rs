@@ -39,7 +39,13 @@ fn setup<'a>() -> (
     let contract_id = env.register(WillContract, ());
     let client = WillContractClient::new(&env, &contract_id);
 
-    (env, client, owner, token_client, token_admin_client.address.clone())
+    (
+        env,
+        client,
+        owner,
+        token_client,
+        token_admin_client.address.clone(),
+    )
 }
 
 fn advance_time(env: &Env, seconds: u64) {
@@ -343,6 +349,221 @@ fn test_update_beneficiaries() {
 }
 
 #[test]
+fn test_update_guardians() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let old_guardian = Address::generate(&env);
+    let new_guardian_1 = Address::generate(&env);
+    let new_guardian_2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, old_guardian],
+    );
+
+    client.update_guardians(
+        &will_id,
+        &owner,
+        &vec![&env, new_guardian_1.clone(), new_guardian_2.clone()],
+    );
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.guardians, vec![&env, new_guardian_1, new_guardian_2]);
+    assert_eq!(will.guardian_votes, 0);
+}
+
+#[test]
+#[should_panic]
+fn test_update_guardians_rejects_non_owner() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let non_owner = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.update_guardians(&will_id, &non_owner, &vec![&env]);
+}
+
+#[test]
+#[should_panic]
+fn test_update_guardians_rejects_too_many_guardians() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.update_guardians(
+        &will_id,
+        &owner,
+        &vec![
+            &env,
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ],
+    );
+}
+
+#[test]
+fn test_update_guardians_resets_votes_and_voted_flags() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+    );
+
+    client.guardian_trigger(&will_id, &guardian_1);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+
+    // Remove the voting guardian, then add them back. Their old per-guardian
+    // flag must not survive either update.
+    client.update_guardians(&will_id, &owner, &vec![&env, guardian_2.clone()]);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 0);
+    client.update_guardians(
+        &will_id,
+        &owner,
+        &vec![&env, guardian_1.clone(), guardian_2],
+    );
+
+    client.guardian_trigger(&will_id, &guardian_1);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+}
+
+#[test]
+#[should_panic]
+fn test_update_guardians_rejected_while_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    client.update_guardians(&will_id, &owner, &vec![&env]);
+}
+
+#[test]
+#[should_panic]
+fn test_update_guardians_rejected_while_released() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+    );
+
+    client.guardian_trigger(&will_id, &guardian_1);
+    client.guardian_trigger(&will_id, &guardian_2);
+    client.update_guardians(&will_id, &owner, &vec![&env]);
+}
+
+#[test]
+#[should_panic]
+fn test_update_guardians_rejected_while_cancelled() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.cancel_will(&will_id, &owner);
+    client.update_guardians(&will_id, &owner, &vec![&env]);
+}
+
+#[test]
 fn test_top_up_increases_balance() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
@@ -410,7 +631,12 @@ fn test_guardian_trigger_requires_two_votes() {
         ],
         &90,
         &7,
-        &vec![&env, guardian_1.clone(), guardian_2.clone(), guardian_3.clone()],
+        &vec![
+            &env,
+            guardian_1.clone(),
+            guardian_2.clone(),
+            guardian_3.clone(),
+        ],
     );
 
     client.guardian_trigger(&will_id, &guardian_1);
