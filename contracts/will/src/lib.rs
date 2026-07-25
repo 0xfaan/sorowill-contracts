@@ -183,7 +183,12 @@ impl WillContract {
     pub fn emergency_checkin(env: Env, will_id: u64, owner: Address) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
-        assert_status(&env, &will, WillStatus::Triggered, WillError::WillNotTriggered);
+        assert_status(
+            &env,
+            &will,
+            WillStatus::Triggered,
+            WillError::WillNotTriggered,
+        );
 
         let trigger_time = will.trigger_time.unwrap_or(0);
         let grace_deadline = trigger_time + will.grace_period_days * SECONDS_PER_DAY;
@@ -214,7 +219,12 @@ impl WillContract {
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
     pub fn release_inheritance(env: Env, will_id: u64) {
         let mut will = load_will(&env, will_id);
-        assert_status(&env, &will, WillStatus::Triggered, WillError::WillNotTriggered);
+        assert_status(
+            &env,
+            &will,
+            WillStatus::Triggered,
+            WillError::WillNotTriggered,
+        );
 
         let trigger_time = will.trigger_time.unwrap_or(0);
         let grace_deadline = trigger_time + will.grace_period_days * SECONDS_PER_DAY;
@@ -286,6 +296,32 @@ impl WillContract {
         storage::save_will(&env, &will);
 
         events::beneficiaries_updated(&env, will_id, &owner);
+    }
+
+    /// Replaces the guardian list for `will_id`. Only possible while the will
+    /// is `Active`. Any votes cast against the previous guardian list are
+    /// cleared so every updated list starts a fresh voting cycle.
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
+    ///   guardians are supplied.
+    pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Address>) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if guardians.len() > MAX_GUARDIANS {
+            panic_with_error!(&env, WillError::TooManyBeneficiaries);
+        }
+
+        storage::reset_guardian_votes(&env, will_id, &will.guardians);
+        will.guardians = guardians;
+        will.guardian_votes = 0;
+        storage::save_will(&env, &will);
+
+        events::guardians_updated(&env, will_id, &owner);
     }
 
     /// Adds `amount` more of the will's token to its locked balance. Only

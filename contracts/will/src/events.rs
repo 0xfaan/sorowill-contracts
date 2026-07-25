@@ -17,7 +17,12 @@ pub fn will_created(
 ) {
     env.events().publish(
         (symbol_short!("created"), will_id),
-        (owner.clone(), balance, beneficiaries_count, checkin_deadline),
+        (
+            owner.clone(),
+            balance,
+            beneficiaries_count,
+            checkin_deadline,
+        ),
     );
 }
 
@@ -69,6 +74,12 @@ pub fn will_cancelled(env: &Env, will_id: u64, owner: &Address, refund_amount: i
 pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("benefup"), will_id), owner.clone());
+}
+
+/// Published when the owner updates the guardian list.
+pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("guardup"), will_id), owner.clone());
 }
 
 /// Published each time a guardian votes to trigger an early release.
