@@ -40,8 +40,12 @@ pub struct Will {
     pub id: u64,
     /// The address that created and funds the will.
     pub owner: Address,
-    /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
+    /// The token contract address (e.g. a USDC Stellar Asset Contract, or the
+    /// native XLM asset address when `is_native` is true) held by the will.
     pub token: Address,
+    /// Whether the held asset is native XLM (as opposed to a token contract).
+    /// When `true`, transfers use `env.transfer()` instead of the token client.
+    pub is_native: bool,
     /// The amount of `token` currently locked in the will, in the token's base units.
     pub balance: i128,
     /// The beneficiaries and their percentage shares. Always sums to 100.
