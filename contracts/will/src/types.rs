@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address, Map, Vec};
 
 /// A single beneficiary entry: an address and the percentage of the will's
 /// balance it is entitled to receive when the inheritance is released.
@@ -40,10 +40,10 @@ pub struct Will {
     pub id: u64,
     /// The address that created and funds the will.
     pub owner: Address,
-    /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
-    pub token: Address,
-    /// The amount of `token` currently locked in the will, in the token's base units.
-    pub balance: i128,
+    /// Map of token contract address → amount currently locked in the will,
+    /// in each token's base units. A will may hold any number of distinct
+    /// SEP-41 compliant tokens simultaneously.
+    pub balances: Map<Address, i128>,
     /// The beneficiaries and their percentage shares. Always sums to 100.
     pub beneficiaries: Vec<Beneficiary>,
     /// How many days the owner may go without checking in before the will
