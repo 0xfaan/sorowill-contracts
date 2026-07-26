@@ -744,3 +744,668 @@ fn test_get_wills_by_beneficiary() {
     assert_eq!(wills.len(), 1);
     assert_eq!(wills.get(0).unwrap().id, will_id);
 }
+
+
+#[test]
+fn test_merge_wills_basic() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &600_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &400_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.balance, 1_000_000);
+    assert_eq!(merged_will.beneficiaries.len(), 2);
+    assert_eq!(merged_will.status, WillStatus::Active);
+    // Check-in period should be minimum (30 days)
+    assert_eq!(merged_will.checkin_period_days, 30);
+    // Grace period should be maximum (7 days)
+    assert_eq!(merged_will.grace_period_days, 7);
+
+    let consumed_will = client.get_will(&will_id_2);
+    assert_eq!(consumed_will.balance, 0);
+    assert_eq!(consumed_will.status, WillStatus::Cancelled);
+}
+
+#[test]
+fn test_merge_wills_matching_beneficiaries() {
+    let (env, client, owner, _token, token_address) = setup();
+    let shared_beneficiary = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &600_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: shared_beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &400_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: shared_beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.balance, 1_000_000);
+    // Should merge into a single beneficiary entry
+    assert_eq!(merged_will.beneficiaries.len(), 1);
+    assert_eq!(
+        merged_will.beneficiaries.get(0).unwrap().percentage,
+        100
+    );
+}
+
+#[test]
+fn test_merge_wills_with_guardians() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+    let guardian_3 = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env, guardian_2.clone(), guardian_3.clone()],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.guardians.len(), 3);
+    assert!(merged_will.guardians.contains(&guardian_1));
+    assert!(merged_will.guardians.contains(&guardian_2));
+    assert!(merged_will.guardians.contains(&guardian_3));
+}
+
+#[test]
+#[should_panic]
+fn test_merge_wills_same_will_id() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id, &will_id);
+}
+
+#[test]
+#[should_panic]
+fn test_merge_wills_not_owner() {
+    let (env, client, owner, _token, token_address) = setup();
+    let not_owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&not_owner, &will_id_1, &will_id_2);
+}
+
+#[test]
+#[should_panic]
+fn test_merge_wills_first_not_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    // Cancel the first will
+    client.cancel_will(&will_id_1, &owner);
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+}
+
+#[test]
+#[should_panic]
+fn test_merge_wills_second_not_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    // Cancel the second will
+    client.cancel_will(&will_id_2, &owner);
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+}
+
+#[test]
+fn test_merge_wills_recalculates_percentages() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.balance, 2_000_000);
+    assert_eq!(merged_will.beneficiaries.len(), 2);
+
+    let mut total_percentage: u32 = 0;
+    for beneficiary in merged_will.beneficiaries.iter() {
+        total_percentage += beneficiary.percentage;
+    }
+    assert_eq!(total_percentage, 100);
+}
+
+#[test]
+fn test_merge_wills_complex_beneficiaries() {
+    let (env, client, owner, _token, token_address) = setup();
+    let benef_a = Address::generate(&env);
+    let benef_b = Address::generate(&env);
+    let benef_c = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: benef_a.clone(),
+                percentage: 60,
+            },
+            Beneficiary {
+                address: benef_b.clone(),
+                percentage: 40,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: benef_b.clone(),
+                percentage: 50,
+            },
+            Beneficiary {
+                address: benef_c.clone(),
+                percentage: 50,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.balance, 2_000_000);
+    // Should have 3 beneficiaries total
+    assert_eq!(merged_will.beneficiaries.len(), 3);
+
+    let mut total_percentage: u32 = 0;
+    for beneficiary in merged_will.beneficiaries.iter() {
+        total_percentage += beneficiary.percentage;
+    }
+    assert_eq!(total_percentage, 100);
+}
+
+#[test]
+#[should_panic]
+fn test_merge_wills_exceeds_beneficiary_limit() {
+    let (env, client, owner, _token, token_address) = setup();
+    let mut benefs_a = Vec::new(&env);
+    let mut benefs_b = Vec::new(&env);
+
+    // Create 6 beneficiaries for will_a
+    for i in 0..6 {
+        benefs_a.push_back(Beneficiary {
+            address: Address::generate(&env),
+            percentage: if i == 5 { 34 } else { 11 },
+        });
+    }
+
+    // Create 5 beneficiaries for will_b
+    for i in 0..5 {
+        benefs_b.push_back(Beneficiary {
+            address: Address::generate(&env),
+            percentage: if i == 4 { 20 } else { 20 },
+        });
+    }
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &benefs_a,
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &benefs_b,
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    // This should panic because it would exceed MAX_BENEFICIARIES (10)
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+}
+
+#[test]
+#[should_panic]
+fn test_merge_wills_exceeds_guardian_limit() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+    let guardian_3 = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+    );
+
+    // Create a second will with different guardians to exceed the limit
+    let g4 = Address::generate(&env);
+    let g5 = Address::generate(&env);
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env, g4.clone(), g5.clone()],
+    );
+
+    // This should panic because it would exceed MAX_GUARDIANS (3)
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+}
+
+#[test]
+fn test_merge_wills_preserves_token_address() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &600_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &400_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.token, token_address);
+}
+
+#[test]
+fn test_merge_wills_updates_beneficiary_index() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &600_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &400_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    // Beneficiary B should now be indexed to the merged will
+    let wills_for_b = client.get_wills_by_beneficiary(&beneficiary_b);
+    assert!(wills_for_b.len() >= 1);
+
+    let mut found = false;
+    for will in wills_for_b.iter() {
+        if will.id == will_id_1 {
+            found = true;
+            break;
+        }
+    }
+    assert!(found);
+}
+
+#[test]
+fn test_merge_wills_clears_guardian_votes() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+    let guardian_3 = Address::generate(&env);
+
+    let will_id_1 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+    );
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env, guardian_3],
+    );
+
+    // Cast a guardian vote on will_id_1
+    client.guardian_trigger(&will_id_1, &guardian_1);
+    assert_eq!(client.get_will(&will_id_1).guardian_votes, 1);
+
+    // Merge wills - should clear guardian votes
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    let merged_will = client.get_will(&will_id_1);
+    assert_eq!(merged_will.guardian_votes, 0);
+}

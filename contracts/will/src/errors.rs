@@ -33,4 +33,12 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// Cannot merge: both wills must be owned by the same address.
+    NotSameOwner = 13,
+    /// Cannot merge: one or both wills are not in Active status.
+    WillNotBothActive = 14,
+    /// Cannot merge: same will id provided for both wills.
+    SameWillId = 15,
+    /// Cannot merge: merging would result in too many beneficiaries or guardians.
+    MergeWouldExceedLimits = 16,
 }
