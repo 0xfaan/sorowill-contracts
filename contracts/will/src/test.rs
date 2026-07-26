@@ -69,7 +69,7 @@ fn test_create_will_success() {
             &env,
             Beneficiary {
                 address: beneficiary.clone(),
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -101,7 +101,7 @@ fn test_checkin_resets_deadline() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -130,7 +130,7 @@ fn test_trigger_after_missed_checkin() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -160,7 +160,7 @@ fn test_cannot_trigger_before_deadline() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -185,7 +185,7 @@ fn test_emergency_checkin_cancels_trigger() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -219,11 +219,11 @@ fn test_release_inheritance_splits_correctly() {
             &env,
             Beneficiary {
                 address: beneficiary_a.clone(),
-                percentage: 60,
+                basis_points: 6_000,
             },
             Beneficiary {
                 address: beneficiary_b.clone(),
-                percentage: 40,
+                basis_points: 4_000,
             },
         ],
         &90,
@@ -259,7 +259,7 @@ fn test_cannot_release_during_grace_period() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -286,7 +286,7 @@ fn test_cancel_will_refunds_owner() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -317,7 +317,7 @@ fn test_update_beneficiaries() {
             &env,
             Beneficiary {
                 address: beneficiary_a,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -332,11 +332,11 @@ fn test_update_beneficiaries() {
             &env,
             Beneficiary {
                 address: beneficiary_b.clone(),
-                percentage: 50,
+                basis_points: 5_000,
             },
             Beneficiary {
                 address: beneficiary_c.clone(),
-                percentage: 50,
+                basis_points: 5_000,
             },
         ],
     );
@@ -364,7 +364,7 @@ fn test_update_guardians() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -398,7 +398,7 @@ fn test_update_guardians_rejects_non_owner() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -423,7 +423,7 @@ fn test_update_guardians_rejects_too_many_guardians() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -459,7 +459,7 @@ fn test_update_guardians_resets_votes_and_voted_flags() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -497,7 +497,7 @@ fn test_update_guardians_rejected_while_triggered() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -525,7 +525,7 @@ fn test_update_guardians_rejected_while_released() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -551,7 +551,7 @@ fn test_update_guardians_rejected_while_cancelled() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -576,7 +576,7 @@ fn test_top_up_increases_balance() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -626,7 +626,7 @@ fn test_guardian_trigger_requires_two_votes() {
             &env,
             Beneficiary {
                 address: beneficiary.clone(),
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -666,11 +666,11 @@ fn test_invalid_percentages_rejected() {
             &env,
             Beneficiary {
                 address: beneficiary_a,
-                percentage: 60,
+                basis_points: 6_000,
             },
             Beneficiary {
                 address: beneficiary_b,
-                percentage: 30,
+                basis_points: 3_000,
             },
         ],
         &90,
@@ -692,7 +692,7 @@ fn test_get_wills_by_owner() {
             &env,
             Beneficiary {
                 address: beneficiary.clone(),
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -707,7 +707,7 @@ fn test_get_wills_by_owner() {
             &env,
             Beneficiary {
                 address: beneficiary,
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &30,
@@ -732,7 +732,7 @@ fn test_get_wills_by_beneficiary() {
             &env,
             Beneficiary {
                 address: beneficiary.clone(),
-                percentage: 100,
+                basis_points: 10_000,
             },
         ],
         &90,
@@ -743,4 +743,259 @@ fn test_get_wills_by_beneficiary() {
     let wills = client.get_wills_by_beneficiary(&beneficiary);
     assert_eq!(wills.len(), 1);
     assert_eq!(wills.get(0).unwrap().id, will_id);
+}
+
+// ── Basis-point / fractional-split tests ─────────────────────────────────────
+
+/// A three-way split that is only representable with basis points:
+///   A: 50.00 % → 5_000 bp
+///   B: 33.33 % → 3_333 bp
+///   C: 16.67 % → 1_667 bp  (sum = 10_000)
+///
+/// On a balance of 1_000_000 the expected payouts are:
+///   A = 1_000_000 * 5_000 / 10_000 = 500_000
+///   B = 1_000_000 * 3_333 / 10_000 = 333_300
+///   C = remainder                   = 166_700
+#[test]
+fn test_fractional_three_way_split() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let beneficiary_c = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                basis_points: 5_000,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                basis_points: 3_333,
+            },
+            Beneficiary {
+                address: beneficiary_c.clone(),
+                basis_points: 1_667,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    assert_eq!(token.balance(&beneficiary_a), 500_000);
+    assert_eq!(token.balance(&beneficiary_b), 333_300);
+    // Remainder goes to the last beneficiary so the full balance is drained.
+    assert_eq!(token.balance(&beneficiary_c), 166_700);
+    assert_eq!(token.balance(&client.address), 0);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
+    assert_eq!(will.balance, 0);
+}
+
+/// Extreme split: 1 bp for A, 9_999 bp for B.
+/// On a balance of 1_000_000:
+///   A = 1_000_000 * 1 / 10_000 = 100
+///   B = remainder               = 999_900
+#[test]
+fn test_fractional_extreme_one_bp_split() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                basis_points: 1,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                basis_points: 9_999,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    assert_eq!(token.balance(&beneficiary_a), 100);
+    assert_eq!(token.balance(&beneficiary_b), 999_900);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+/// Validation must reject a basis-point sum of 10_001 (one over the limit).
+#[test]
+#[should_panic]
+fn test_basis_points_over_10000_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a,
+                basis_points: 5_001,
+            },
+            Beneficiary {
+                address: beneficiary_b,
+                basis_points: 5_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+}
+
+/// Validation must reject a basis-point sum of 9_999 (one under the limit).
+#[test]
+#[should_panic]
+fn test_basis_points_under_10000_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a,
+                basis_points: 4_999,
+            },
+            Beneficiary {
+                address: beneficiary_b,
+                basis_points: 5_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+}
+
+/// update_beneficiaries must also enforce the 10_000 bp invariant on the
+/// replacement list, and fractional splits set via that path must distribute
+/// correctly when inheritance is released.
+///
+/// Updated split: A = 2_500 bp (25 %), B = 7_500 bp (75 %).
+/// On a balance of 1_000_000: A = 250_000, B = 750_000.
+#[test]
+fn test_update_beneficiaries_fractional_split() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let beneficiary_orig = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_orig,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                basis_points: 2_500,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                basis_points: 7_500,
+            },
+        ],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    assert_eq!(token.balance(&beneficiary_a), 250_000);
+    assert_eq!(token.balance(&beneficiary_b), 750_000);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+/// update_beneficiaries must reject a replacement list whose basis points
+/// do not sum to exactly 10_000.
+#[test]
+#[should_panic]
+fn test_update_beneficiaries_rejects_invalid_basis_points() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_orig = Address::generate(&env);
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_orig,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // 3_000 + 3_000 = 6_000 ≠ 10_000 — must panic.
+    client.update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a,
+                basis_points: 3_000,
+            },
+            Beneficiary {
+                address: beneficiary_b,
+                basis_points: 3_000,
+            },
+        ],
+    );
 }
