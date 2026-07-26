@@ -1,4 +1,8 @@
-#![no_std]
+// The deployed contract is `no_std`. The test and fuzzing harnesses need
+// `std` (the Soroban test host, `proptest` and `libfuzzer-sys` all pull it
+// in), so `std` is linked only for those configurations. The wasm build,
+// which sees neither `cfg(test)` nor the `fuzzing` feature, stays `no_std`.
+#![cfg_attr(not(any(test, feature = "fuzzing")), no_std)]
 
 //! SoroWill — a trustless on-chain inheritance and dead man's switch protocol
 //! for Stellar Soroban.
@@ -23,6 +27,15 @@ mod events;
 mod storage;
 mod types;
 
+/// Reusable harness that drives entry points with arbitrary input and asserts
+/// the contract's invariants. Shared by the `proptest` suite in
+/// [`fuzz_test`] and by the `cargo-fuzz` targets under `fuzz/`.
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fuzz_harness;
+
+#[cfg(test)]
+mod fuzz_test;
+
 #[cfg(test)]
 mod test;
 
@@ -41,6 +54,16 @@ const MAX_BENEFICIARIES: u32 = 10;
 /// Maximum number of guardians a single will may have.
 const MAX_GUARDIANS: u32 = 3;
 
+/// Maximum length, in days, of a will's check-in or grace period (10 years).
+///
+/// Periods are converted to absolute timestamps by multiplying by
+/// [`SECONDS_PER_DAY`]. Bounding them here guarantees that conversion can
+/// never overflow the `u64` ledger timestamp, which would otherwise panic
+/// outright — or, worse, produce a will whose deadline is unreachable, so
+/// that `trigger_will` can never run and the locked balance can never be
+/// released.
+const MAX_PERIOD_DAYS: u64 = 3_650;
+
 /// Number of distinct guardian votes required to force an early release.
 const GUARDIAN_THRESHOLD: u32 = 2;
 
@@ -55,10 +78,14 @@ impl WillContract {
     /// - `owner`: the address creating the will; must authorize this call.
     /// - `token`: the token contract address (e.g. a USDC Stellar Asset Contract).
     /// - `amount`: the amount of `token` to lock, in the token's base units. Must be positive.
-    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose percentages sum to exactly 100.
-    /// - `checkin_period_days`: how many days the owner may go without checking in.
-    /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
-    /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
+    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries, each with a share of
+    ///   1 to 100, whose percentages sum to exactly 100.
+    /// - `checkin_period_days`: how many days the owner may go without checking
+    ///   in; 1 to `MAX_PERIOD_DAYS`.
+    /// - `grace_period_days`: how many days after being triggered the owner has
+    ///   to prove they are alive; 1 to `MAX_PERIOD_DAYS`.
+    /// - `guardians`: 0 to `MAX_GUARDIANS` distinct addresses that may jointly
+    ///   force an early release.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -67,7 +94,11 @@ impl WillContract {
     /// - [`WillError::ZeroAmount`] if `amount` is not positive.
     /// - [`WillError::TooManyBeneficiaries`] if the beneficiary list is empty or too large,
     ///   or if too many guardians are supplied.
-    /// - [`WillError::InvalidPercentages`] if beneficiary percentages do not sum to 100.
+    /// - [`WillError::InvalidPercentages`] if any share is outside `1..=100`, or if
+    ///   the shares do not sum to 100.
+    /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
+    /// - [`WillError::InvalidPeriod`] if either period is zero or exceeds
+    ///   [`MAX_PERIOD_DAYS`].
     #[allow(clippy::too_many_arguments)]
     pub fn create_will(
         env: Env,
@@ -84,13 +115,12 @@ impl WillContract {
         if amount <= 0 {
             panic_with_error!(&env, WillError::ZeroAmount);
         }
-        if beneficiaries.is_empty()
-            || beneficiaries.len() > MAX_BENEFICIARIES
-            || guardians.len() > MAX_GUARDIANS
-        {
+        if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
         assert_valid_percentages(&env, &beneficiaries);
+        assert_valid_guardians(&env, &guardians);
+        assert_valid_periods(&env, checkin_period_days, grace_period_days);
 
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
@@ -269,7 +299,8 @@ impl WillContract {
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if the new list is empty or too large.
-    /// - [`WillError::InvalidPercentages`] if the new percentages do not sum to 100.
+    /// - [`WillError::InvalidPercentages`] if any new share is outside `1..=100`,
+    ///   or if the new shares do not sum to 100.
     pub fn update_beneficiaries(
         env: Env,
         will_id: u64,
@@ -307,14 +338,13 @@ impl WillContract {
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
     ///   guardians are supplied.
+    /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
     pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Address>) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        if guardians.len() > MAX_GUARDIANS {
-            panic_with_error!(&env, WillError::TooManyBeneficiaries);
-        }
+        assert_valid_guardians(&env, &guardians);
 
         storage::reset_guardian_votes(&env, will_id, &will.guardians);
         will.guardians = guardians;
@@ -442,14 +472,61 @@ fn assert_status(env: &Env, will: &Will, expected: WillStatus, err: WillError) {
     }
 }
 
-/// Asserts beneficiary percentages sum to exactly 100.
+/// Asserts every beneficiary share is in `1..=100` and that the shares sum to
+/// exactly 100.
+///
+/// The per-share bound is not merely cosmetic: without it a caller could pass
+/// shares near `u32::MAX` and overflow the running total, which panics under
+/// `overflow-checks` instead of returning [`WillError::InvalidPercentages`].
+/// With every share capped at 100 and the caller-side cap of
+/// [`MAX_BENEFICIARIES`] entries, the total cannot exceed 1000.
+///
+/// A zero share is rejected too: such a beneficiary is recorded and indexed on
+/// the will but would receive nothing on release.
 fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     let mut total: u32 = 0;
     for beneficiary in beneficiaries.iter() {
+        if !(1..=100).contains(&beneficiary.percentage) {
+            panic_with_error!(env, WillError::InvalidPercentages);
+        }
         total += beneficiary.percentage;
     }
     if total != 100 {
         panic_with_error!(env, WillError::InvalidPercentages);
+    }
+}
+
+/// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
+/// repeated address.
+///
+/// Duplicates matter because [`WillContract::guardian_trigger`] counts each
+/// address at most once. A list such as `[g, g]` looks like a working 2-of-2
+/// quorum but can only ever reach a single vote, silently leaving the will with
+/// a guardian override that can never fire.
+fn assert_valid_guardians(env: &Env, guardians: &Vec<Address>) {
+    if guardians.len() > MAX_GUARDIANS {
+        panic_with_error!(env, WillError::TooManyBeneficiaries);
+    }
+    for i in 0..guardians.len() {
+        let guardian = guardians.get_unchecked(i);
+        for j in (i + 1)..guardians.len() {
+            if guardian == guardians.get_unchecked(j) {
+                panic_with_error!(env, WillError::DuplicateGuardian);
+            }
+        }
+    }
+}
+
+/// Asserts both periods are at least one day and at most [`MAX_PERIOD_DAYS`].
+///
+/// The upper bound keeps `days * SECONDS_PER_DAY` well inside `u64`. The lower
+/// bound rules out a zero-day period, which would make a will triggerable (or
+/// releasable) in the very ledger it was created in, defeating the check-in
+/// mechanism entirely.
+fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: u64) {
+    let valid = 1..=MAX_PERIOD_DAYS;
+    if !valid.contains(&checkin_period_days) || !valid.contains(&grace_period_days) {
+        panic_with_error!(env, WillError::InvalidPeriod);
     }
 }
 
