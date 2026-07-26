@@ -23,6 +23,11 @@ mod events;
 mod storage;
 mod types;
 
+/// Resource-cost profile for every public entry point. Measurement rather
+/// than assertion — see the module docs for how to read the numbers.
+#[cfg(test)]
+mod profile;
+
 #[cfg(test)]
 mod test;
 
@@ -197,11 +202,14 @@ impl WillContract {
             panic_with_error!(&env, WillError::GracePeriodExpired);
         }
 
+        // Clear the vote markers before zeroing the counter: the counter is
+        // what tells `reset_guardian_votes` whether there is anything to clear.
+        storage::reset_guardian_votes(&env, &will);
+
         will.status = WillStatus::Active;
         will.trigger_time = None;
         will.last_checkin = now;
         will.guardian_votes = 0;
-        storage::reset_guardian_votes(&env, will_id, &will.guardians);
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
@@ -285,11 +293,21 @@ impl WillContract {
         }
         assert_valid_percentages(&env, &beneficiaries);
 
+        // Only addresses that actually join or leave the will need their
+        // reverse index touched. Unconditionally removing every old address
+        // and re-adding every new one costs a storage read and write per
+        // address even when the lists are identical — which is the common
+        // case, since most updates only re-cut the percentages. Membership is
+        // decided against the two lists already in memory, at no storage cost.
         for old in will.beneficiaries.iter() {
-            storage::remove_beneficiary_index(&env, &old.address, will_id);
+            if !names_address(&beneficiaries, &old.address) {
+                storage::remove_beneficiary_index(&env, &old.address, will_id);
+            }
         }
         for new_beneficiary in beneficiaries.iter() {
-            storage::index_by_beneficiary(&env, &new_beneficiary.address, will_id);
+            if !names_address(&will.beneficiaries, &new_beneficiary.address) {
+                storage::index_by_beneficiary(&env, &new_beneficiary.address, will_id);
+            }
         }
 
         will.beneficiaries = beneficiaries;
@@ -316,7 +334,7 @@ impl WillContract {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
 
-        storage::reset_guardian_votes(&env, will_id, &will.guardians);
+        storage::reset_guardian_votes(&env, &will);
         will.guardians = guardians;
         will.guardian_votes = 0;
         storage::save_will(&env, &will);
@@ -408,12 +426,16 @@ impl WillContract {
 
         storage::set_guardian_voted(&env, will_id, &guardian);
         will.guardian_votes += 1;
-        storage::save_will(&env, &will);
 
         events::guardian_voted(&env, will_id, &guardian, will.guardian_votes);
 
+        // `distribute` persists the will itself. Saving here as well would
+        // write the whole entry twice — and extend its TTL twice — in the one
+        // invocation that reaches quorum.
         if will.guardian_votes >= GUARDIAN_THRESHOLD {
             distribute(&env, &mut will);
+        } else {
+            storage::save_will(&env, &will);
         }
     }
 }
@@ -440,6 +462,16 @@ fn assert_status(env: &Env, will: &Will, expected: WillStatus, err: WillError) {
     if will.status != expected {
         panic_with_error!(env, err);
     }
+}
+
+/// Returns whether `beneficiaries` names `address`.
+///
+/// Operates on an in-memory list, so callers can decide reverse-index
+/// membership without touching storage.
+fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
+    beneficiaries
+        .iter()
+        .any(|beneficiary| &beneficiary.address == address)
 }
 
 /// Asserts beneficiary percentages sum to exactly 100.
