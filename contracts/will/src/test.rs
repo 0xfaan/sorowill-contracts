@@ -89,6 +89,94 @@ fn test_create_will_success() {
 }
 
 #[test]
+fn test_protocol_stats_track_create_cancel_and_release() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let second_admin = Address::generate(&env);
+    let (second_token_client, second_token_admin_client) = create_token(&env, &second_admin);
+    second_token_admin_client.mint(&owner, &1_000_000_000);
+    let second_token_address = second_token_admin_client.address.clone();
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let stats = client.get_protocol_stats();
+    assert_eq!(stats.active_will_count, 1);
+    assert_eq!(stats.total_locked_by_token.len(), 1);
+    assert_eq!(
+        stats.total_locked_by_token.get(0).unwrap().token,
+        token_address
+    );
+    assert_eq!(
+        stats.total_locked_by_token.get(0).unwrap().total_locked,
+        1_000_000
+    );
+
+    client.cancel_will(&will_id, &owner);
+
+    let stats = client.get_protocol_stats();
+    assert_eq!(stats.active_will_count, 0);
+    assert_eq!(stats.total_locked_by_token.get(0).unwrap().total_locked, 0);
+
+    let will_id_2 = client.create_will(
+        &owner,
+        &second_token_address,
+        &500_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &30,
+        &3,
+        &vec![&env],
+    );
+
+    let stats = client.get_protocol_stats();
+    assert_eq!(stats.active_will_count, 1);
+    assert_eq!(stats.total_locked_by_token.len(), 2);
+    assert_eq!(
+        stats.total_locked_by_token.get(0).unwrap().token,
+        token_address
+    );
+    assert_eq!(stats.total_locked_by_token.get(0).unwrap().total_locked, 0);
+    assert_eq!(
+        stats.total_locked_by_token.get(1).unwrap().token,
+        second_token_address
+    );
+    assert_eq!(
+        stats.total_locked_by_token.get(1).unwrap().total_locked,
+        500_000
+    );
+
+    advance_time(&env, 31 * DAY);
+    client.trigger_will(&will_id_2);
+    advance_time(&env, 4 * DAY);
+    client.release_inheritance(&will_id_2);
+
+    let stats = client.get_protocol_stats();
+    assert_eq!(stats.active_will_count, 0);
+    assert_eq!(stats.total_locked_by_token.get(0).unwrap().total_locked, 0);
+    assert_eq!(stats.total_locked_by_token.get(1).unwrap().total_locked, 0);
+    assert_eq!(second_token_client.balance(&owner), 1_000_000_000 - 500_000);
+}
+
+#[test]
 fn test_checkin_resets_deadline() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
@@ -586,7 +674,7 @@ fn test_top_up_increases_balance() {
 
     client.top_up(&will_id, &owner, &500_000);
 
-    use soroban_sdk::{testutils::Events, symbol_short, TryIntoVal};
+    use soroban_sdk::{symbol_short, testutils::Events, TryIntoVal};
     let events = env.events().all();
     let mut found = false;
     for event in events.iter() {

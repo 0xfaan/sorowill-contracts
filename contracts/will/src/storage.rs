@@ -10,7 +10,7 @@
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::Will;
+use crate::types::{ProtocolStats, TokenLockedBalance, Will};
 
 /// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
 /// is approximately 17,280 ledgers.
@@ -27,6 +27,8 @@ const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
 enum DataKey {
     /// Monotonically increasing counter used to allocate will ids.
     NextWillId,
+    /// Aggregate protocol statistics tracked on-chain.
+    ProtocolStats,
     /// Full state of a will, keyed by its id.
     Will(u64),
     /// List of will ids owned by an address.
@@ -44,6 +46,66 @@ pub fn next_will_id(env: &Env) -> u64 {
     let next = current + 1;
     env.storage().instance().set(&key, &next);
     next
+}
+
+/// Loads the current protocol statistics from instance storage.
+pub fn get_protocol_stats(env: &Env) -> ProtocolStats {
+    let key = DataKey::ProtocolStats;
+    env.storage()
+        .instance()
+        .get(&key)
+        .unwrap_or_else(|| ProtocolStats {
+            active_will_count: 0,
+            total_locked_by_token: Vec::new(env),
+        })
+}
+
+/// Persists protocol statistics in instance storage.
+pub fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+/// Increments the active-will counter by one.
+pub fn increment_active_will_count(env: &Env) {
+    let mut stats = get_protocol_stats(env);
+    stats.active_will_count += 1;
+    save_protocol_stats(env, &stats);
+}
+
+/// Decrements the active-will counter by one if it is greater than zero.
+pub fn decrement_active_will_count(env: &Env) {
+    let mut stats = get_protocol_stats(env);
+    if stats.active_will_count > 0 {
+        stats.active_will_count -= 1;
+    }
+    save_protocol_stats(env, &stats);
+}
+
+/// Adds or subtracts a token amount from the protocol's locked-balance totals.
+pub fn adjust_locked_value(env: &Env, token: &Address, delta: i128) {
+    let mut stats = get_protocol_stats(env);
+    let mut found = false;
+    let mut updated = Vec::new(env);
+    for entry in stats.total_locked_by_token.iter() {
+        if entry.token == *token {
+            let next_total = entry.total_locked + delta;
+            updated.push_back(TokenLockedBalance {
+                token: entry.token.clone(),
+                total_locked: next_total,
+            });
+            found = true;
+        } else {
+            updated.push_back(entry.clone());
+        }
+    }
+    if !found {
+        updated.push_back(TokenLockedBalance {
+            token: token.clone(),
+            total_locked: delta,
+        });
+    }
+    stats.total_locked_by_token = updated;
+    save_protocol_stats(env, &stats);
 }
 
 /// Persists a will's state and refreshes its storage TTL.

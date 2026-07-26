@@ -29,7 +29,7 @@ mod test;
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus};
+pub use types::{Beneficiary, ProtocolStats, Will, WillStatus};
 
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
@@ -105,7 +105,7 @@ impl WillContract {
         let will = Will {
             id: will_id,
             owner: owner.clone(),
-            token,
+            token: token.clone(),
             balance: amount,
             beneficiaries,
             checkin_period_days,
@@ -118,6 +118,8 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::increment_active_will_count(&env);
+        storage::adjust_locked_value(&env, &token, amount);
 
         events::will_created(
             &env,
@@ -255,6 +257,9 @@ impl WillContract {
             &refund,
         );
 
+        storage::decrement_active_will_count(&env);
+        storage::adjust_locked_value(&env, &will.token, -refund);
+
         will.balance = 0;
         will.status = WillStatus::Cancelled;
         storage::save_will(&env, &will);
@@ -347,6 +352,7 @@ impl WillContract {
         );
 
         will.balance += amount;
+        storage::adjust_locked_value(&env, &will.token, amount);
         storage::save_will(&env, &will);
 
         events::top_up(&env, will_id, &owner, amount, will.balance);
@@ -358,6 +364,11 @@ impl WillContract {
     /// - [`WillError::WillNotFound`] if no will exists with this id.
     pub fn get_will(env: Env, will_id: u64) -> Will {
         load_will(&env, will_id)
+    }
+
+    /// Returns aggregate protocol statistics for all wills currently tracked on-chain.
+    pub fn get_protocol_stats(env: Env) -> ProtocolStats {
+        storage::get_protocol_stats(&env)
     }
 
     /// Returns the full state of every will owned by `owner`.
@@ -476,6 +487,9 @@ fn distribute(env: &Env, will: &mut Will) {
             token_client.transfer(&contract_address, &beneficiary.address, &share);
         }
     }
+
+    storage::decrement_active_will_count(env);
+    storage::adjust_locked_value(env, &will.token, -total);
 
     will.balance = 0;
     will.status = WillStatus::Released;

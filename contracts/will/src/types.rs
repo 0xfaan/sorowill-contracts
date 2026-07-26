@@ -32,6 +32,26 @@ pub enum WillStatus {
     Cancelled,
 }
 
+/// Aggregate protocol statistics that can be queried directly on-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenLockedBalance {
+    /// The token contract address.
+    pub token: Address,
+    /// The total amount of this token that is currently locked in active wills.
+    pub total_locked: i128,
+}
+
+/// Aggregate protocol statistics that can be queried directly on-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    /// The number of wills that are still in a non-terminal state.
+    pub active_will_count: u64,
+    /// Locked balances by token for all currently active wills.
+    pub total_locked_by_token: Vec<TokenLockedBalance>,
+}
+
 /// The full on-chain state of a single will.
 #[contracttype]
 #[derive(Clone, Debug)]
