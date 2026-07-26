@@ -47,6 +47,9 @@ const GUARDIAN_THRESHOLD: u32 = 2;
 #[contract]
 pub struct WillContract;
 
+/// Current contract schema version. Must match storage::CURRENT_SCHEMA_VERSION.
+const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 #[contractimpl]
 impl WillContract {
     /// Creates a new will, locking `amount` of `token` in the contract.
@@ -115,6 +118,7 @@ impl WillContract {
             status: WillStatus::Active,
             guardians,
             guardian_votes: 0,
+            schema_version: CURRENT_SCHEMA_VERSION,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -415,6 +419,35 @@ impl WillContract {
         if will.guardian_votes >= GUARDIAN_THRESHOLD {
             distribute(&env, &mut will);
         }
+    }
+
+    /// Migrates a will to the latest schema version. The owner must authorize
+    /// this call. This is an owner-initiated per-will migration that allows
+    /// users to opt-in to new contract versions without being forced to do so.
+    ///
+    /// # Current behavior (v0 → v1)
+    /// Sets the schema_version field to 1. Future versions will implement
+    /// data transformations here.
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    pub fn migrate_will(env: Env, will_id: u64, owner: Address) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+
+        let old_version = will.schema_version;
+
+        // Check if already on current version
+        if old_version >= CURRENT_SCHEMA_VERSION {
+            return;
+        }
+
+        // Apply version-specific migrations in sequence
+        will.schema_version = CURRENT_SCHEMA_VERSION;
+
+        storage::save_will(&env, &will);
+        events::will_migrated(&env, will_id, &owner, old_version, CURRENT_SCHEMA_VERSION);
     }
 }
 

@@ -35,6 +35,8 @@ enum DataKey {
     BeneficiaryWills(Address),
     /// Whether a guardian has already voted in the current trigger cycle.
     GuardianVote(u64, Address),
+    /// Current contract schema version for migrations.
+    SchemaVersion,
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
@@ -157,4 +159,21 @@ pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Address>) {
         let key = DataKey::GuardianVote(will_id, guardian.clone());
         env.storage().persistent().remove(&key);
     }
+}
+
+
+/// Current contract schema version. Increment this whenever the Will struct
+/// or storage format changes, then implement migration logic in lib.rs.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
+/// Gets the current contract schema version stored in state.
+pub fn get_contract_schema_version(env: &Env) -> u32 {
+    let key = DataKey::SchemaVersion;
+    env.storage().instance().get(&key).unwrap_or(0)
+}
+
+/// Updates the contract schema version. Called once per new deployment.
+pub fn set_contract_schema_version(env: &Env, version: u32) {
+    let key = DataKey::SchemaVersion;
+    env.storage().instance().set(&key, &version);
 }
