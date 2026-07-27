@@ -42,15 +42,10 @@ pub struct Will {
     pub id: u64,
     /// The address that created and funds the will.
     pub owner: Address,
-    /// Map of token contract address → amount currently locked in the will,
+    /// Map of token contract address -> amount currently locked in the will,
     /// in each token's base units. A will may hold any number of distinct
     /// SEP-41 compliant tokens simultaneously.
     pub balances: Map<Address, i128>,
-    /// The beneficiaries and their percentage shares. Always sums to 100.
-    /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
-    pub token: Address,
-    /// The amount of `token` currently locked in the will, in the token's base units.
-    pub balance: i128,
     /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
     /// How many days the owner may go without checking in before the will
@@ -71,4 +66,9 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Unix timestamp (seconds) of the last guardian-list change.
+    /// `guardian_trigger` is only effective after a cooldown period has
+    /// elapsed since this timestamp, preventing a compromised owner from
+    /// swapping guardians right before a malicious action.
+    pub guardian_list_updated_at: u64,
 }

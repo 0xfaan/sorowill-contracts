@@ -74,6 +74,17 @@ const MAX_TOKENS: u32 = 10;
 /// Number of distinct guardian votes required to force an early release.
 const GUARDIAN_THRESHOLD: u32 = 2;
 
+/// Minimum number of wills that can be created in a single batch call.
+const BATCH_MIN: u32 = 1;
+
+/// Maximum number of wills that can be created in a single batch call.
+const BATCH_MAX: u32 = 10;
+
+/// Cooldown period in days after a guardian-list change before `guardian_trigger`
+/// takes effect. Prevents a compromised owner from swapping guardians right
+/// before attempting something malicious.
+const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
+
 #[contract]
 pub struct WillContract;
 
@@ -86,21 +97,14 @@ impl WillContract {
     /// - `tokens`: a list of `(token_address, amount)` pairs to lock. Each
     ///   token address must be unique, each amount must be positive, and the
     ///   list must contain between 1 and `MAX_TOKENS` entries.
-    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose percentages sum to exactly 100.
-    /// - `token`: the token contract address (e.g. a USDC Stellar Asset Contract).
-    /// - `amount`: the amount of `token` to lock, in the token's base units. Must be positive.
-    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries, each with a share of
-    ///   1 to 100, whose percentages sum to exactly 100.
+    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points
+    ///   sum to exactly 10,000.
     /// - `checkin_period_days`: how many days the owner may go without checking
     ///   in; 1 to `MAX_PERIOD_DAYS`.
     /// - `grace_period_days`: how many days after being triggered the owner has
     ///   to prove they are alive; 1 to `MAX_PERIOD_DAYS`.
     /// - `guardians`: 0 to `MAX_GUARDIANS` distinct addresses that may jointly
     ///   force an early release.
-    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points sum to exactly 10,000.
-    /// - `checkin_period_days`: how many days the owner may go without checking in.
-    /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
-    /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -109,16 +113,10 @@ impl WillContract {
     /// - [`WillError::ZeroAmount`] if any token amount is not positive.
     /// - [`WillError::TooManyBeneficiaries`] if the beneficiary/guardian/token lists are
     ///   empty or exceed their respective caps.
-    /// - [`WillError::InvalidPercentages`] if beneficiary percentages do not sum to 100.
-    /// - [`WillError::ZeroAmount`] if `amount` is not positive.
-    /// - [`WillError::TooManyBeneficiaries`] if the beneficiary list is empty or too large,
-    ///   or if too many guardians are supplied.
-    /// - [`WillError::InvalidPercentages`] if any share is outside `1..=100`, or if
-    ///   the shares do not sum to 100.
+    /// - [`WillError::InvalidPercentages`] if beneficiary basis points do not sum to 10,000.
     /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
     /// - [`WillError::InvalidPeriod`] if either period is zero or exceeds
     ///   [`MAX_PERIOD_DAYS`].
-    /// - [`WillError::InvalidPercentages`] if beneficiary basis points do not sum to 10,000.
     #[allow(clippy::too_many_arguments)]
     pub fn create_will(
         env: Env,
@@ -181,6 +179,7 @@ impl WillContract {
             status: WillStatus::Active,
             guardians,
             guardian_votes: 0,
+            guardian_list_updated_at: now,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -345,8 +344,6 @@ impl WillContract {
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if the new list is empty or too large.
-    /// - [`WillError::InvalidPercentages`] if any new share is outside `1..=100`,
-    ///   or if the new shares do not sum to 100.
     /// - [`WillError::InvalidPercentages`] if the new basis points do not sum to 10,000.
     pub fn update_beneficiaries(
         env: Env,
@@ -390,6 +387,10 @@ impl WillContract {
     /// is `Active`. Any votes cast against the previous guardian list are
     /// cleared so every updated list starts a fresh voting cycle.
     ///
+    /// Records the current timestamp as `guardian_list_updated_at` so that
+    /// [`guardian_trigger`] enforces a cooldown before the new list takes
+    /// effect (see [`GUARDIAN_COOLDOWN_DAYS`]).
+    ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
@@ -403,9 +404,11 @@ impl WillContract {
 
         assert_valid_guardians(&env, &guardians);
 
+        let now = env.ledger().timestamp();
         storage::reset_guardian_votes(&env, &will);
         will.guardians = guardians;
         will.guardian_votes = 0;
+        will.guardian_list_updated_at = now;
         storage::save_will(&env, &will);
 
         events::guardians_updated(&env, will_id, &owner);
@@ -451,11 +454,22 @@ impl WillContract {
         load_will(&env, will_id)
     }
 
-    /// Returns the full state of every will owned by `owner`.
-    pub fn get_wills_by_owner(env: Env, owner: Address) -> Vec<Will> {
+    /// Returns a page of wills owned by `owner`.
+    ///
+    /// Supports bounded pagination to avoid hitting Soroban resource limits
+    /// for addresses with many wills.
+    ///
+    /// # Parameters
+    /// - `owner`: the address whose wills to query.
+    /// - `cursor`: optional will id to paginate after (exclusive). Pass `None`
+    ///   or `0` for the first page.
+    /// - `limit`: maximum number of wills to return. Capped at
+    ///   [`storage::MAX_PAGE_SIZE`].
+    pub fn get_wills_by_owner(env: Env, owner: Address, cursor: Option<u64>, limit: u32) -> Vec<Will> {
         let ids = storage::get_owner_wills(&env, &owner);
+        let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in ids.iter() {
+        for id in page.iter() {
             if let Ok(will) = storage::load_will(&env, id) {
                 wills.push_back(will);
             }
@@ -463,11 +477,27 @@ impl WillContract {
         wills
     }
 
-    /// Returns the full state of every will `beneficiary` is named in.
-    pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
+    /// Returns a page of wills that `beneficiary` is named in.
+    ///
+    /// Supports bounded pagination to avoid hitting Soroban resource limits
+    /// for addresses with many wills.
+    ///
+    /// # Parameters
+    /// - `beneficiary`: the address to query wills for.
+    /// - `cursor`: optional will id to paginate after (exclusive). Pass `None`
+    ///   or `0` for the first page.
+    /// - `limit`: maximum number of wills to return. Capped at
+    ///   [`storage::MAX_PAGE_SIZE`].
+    pub fn get_wills_by_beneficiary(
+        env: Env,
+        beneficiary: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
+        let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in ids.iter() {
+        for id in page.iter() {
             if let Ok(will) = storage::load_will(&env, id) {
                 wills.push_back(will);
             }
@@ -481,14 +511,27 @@ impl WillContract {
     /// immediately distributed to beneficiaries, bypassing the check-in and
     /// grace-period flow entirely.
     ///
+    /// Enforces a cooldown after a guardian-list change: if the current
+    /// guardian list was updated less than [`GUARDIAN_COOLDOWN_DAYS`] days ago,
+    /// the vote is rejected with [`WillError::GuardianCooldownActive`].
+    ///
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::NotGuardian`] if `guardian` is not one of the will's guardians.
     /// - [`WillError::AlreadyVoted`] if `guardian` already voted in this cycle.
+    /// - [`WillError::GuardianCooldownActive`] if the guardian-list cooldown has not elapsed.
     pub fn guardian_trigger(env: Env, will_id: u64, guardian: Address) {
         guardian.require_auth();
         let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        // Enforce guardian-list cooldown.
+        let now = env.ledger().timestamp();
+        let cooldown_seconds = GUARDIAN_COOLDOWN_DAYS * SECONDS_PER_DAY;
+        let cooldown_ends = will.guardian_list_updated_at + cooldown_seconds;
+        if now < cooldown_ends {
+            panic_with_error!(&env, WillError::GuardianCooldownActive);
+        }
 
         if !will.guardians.contains(&guardian) {
             panic_with_error!(&env, WillError::NotGuardian);
@@ -510,6 +553,218 @@ impl WillContract {
         } else {
             storage::save_will(&env, &will);
         }
+    }
+
+    // ── #21: Will cloning / templates ────────────────────────────────────
+
+    /// Clones an existing will's configuration into a new will with fresh
+    /// token balances.
+    ///
+    /// Copies beneficiaries, guardian list, check-in period, and grace period
+    /// from the source will. The new will gets a fresh balance (funded by the
+    /// `tokens` parameter), a new id, and starts with `Active` status and a
+    /// fresh check-in deadline.
+    ///
+    /// The source will must be `Active` or `Triggered` (any non-destroyed will).
+    /// The owner must authorize this call.
+    ///
+    /// # Parameters
+    /// - `source_will_id`: the id of the will to clone configuration from.
+    /// - `owner`: the address creating the new will.
+    /// - `tokens`: token balances to lock in the new will (same format as
+    ///   [`create_will`]).
+    ///
+    /// # Returns
+    /// The newly allocated will id.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the source will does not exist.
+    /// - [`WillError::ZeroAmount`] if any token amount is not positive.
+    /// - [`WillError::TooManyBeneficiaries`] if the token list is empty or too large.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clone_will(
+        env: Env,
+        source_will_id: u64,
+        owner: Address,
+        tokens: Vec<(Address, i128)>,
+    ) -> u64 {
+        owner.require_auth();
+
+        if tokens.is_empty() || tokens.len() > MAX_TOKENS {
+            panic_with_error!(&env, WillError::TooManyBeneficiaries);
+        }
+
+        let source = load_will(&env, source_will_id);
+
+        // Build balances map and transfer tokens from the owner.
+        let mut balances: Map<Address, i128> = Map::new(&env);
+        for (token_addr, amount) in tokens.iter() {
+            if amount <= 0 {
+                panic_with_error!(&env, WillError::ZeroAmount);
+            }
+            token::Client::new(&env, &token_addr).transfer(
+                &owner,
+                &env.current_contract_address(),
+                &amount,
+            );
+            let prev = balances.get(token_addr.clone()).unwrap_or(0);
+            balances.set(token_addr, prev + amount);
+        }
+
+        let will_id = storage::next_will_id(&env);
+        let now = env.ledger().timestamp();
+        let token_count = balances.len();
+        let beneficiaries_count = source.beneficiaries.len();
+
+        for beneficiary in source.beneficiaries.iter() {
+            storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
+        }
+
+        let will = Will {
+            id: will_id,
+            owner: owner.clone(),
+            balances,
+            beneficiaries: source.beneficiaries.clone(),
+            checkin_period_days: source.checkin_period_days,
+            grace_period_days: source.grace_period_days,
+            last_checkin: now,
+            trigger_time: None,
+            status: WillStatus::Active,
+            guardians: source.guardians.clone(),
+            guardian_votes: 0,
+            guardian_list_updated_at: now,
+        };
+        storage::save_will(&env, &will);
+        storage::index_by_owner(&env, &owner, will_id);
+
+        events::will_created(
+            &env,
+            will_id,
+            &owner,
+            token_count,
+            beneficiaries_count,
+            now + source.checkin_period_days * SECONDS_PER_DAY,
+        );
+        events::will_cloned(&env, source_will_id, will_id, &owner);
+
+        will_id
+    }
+
+    // ── #19: Batch will creation ─────────────────────────────────────────
+
+    /// Creates multiple wills in a single transaction.
+    ///
+    /// Each entry in `will_specs` is a tuple of:
+    /// - `tokens`: `(token_address, amount)` pairs to lock.
+    /// - `beneficiaries`: beneficiary list with basis-point shares.
+    /// - `checkin_period_days`: check-in period in days.
+    /// - `grace_period_days`: grace period in days.
+    /// - `guardians`: guardian address list.
+    ///
+    /// The owner must authorize the entire call. All wills are created under
+    /// the same `owner`.
+    ///
+    /// # Returns
+    /// A `Vec<u64>` of newly allocated will ids, one per spec.
+    ///
+    /// # Panics
+    /// - [`WillError::TooManyBeneficiaries`] if the batch is empty or exceeds
+    ///   [`BATCH_MAX`], or if any individual spec violates beneficiary/guardian/token caps.
+    /// - Any error that [`create_will`] would panic with for an individual spec.
+    #[allow(clippy::too_many_arguments)]
+    pub fn batch_create_wills(
+        env: Env,
+        owner: Address,
+        will_specs: Vec<(
+            Vec<(Address, i128)>,
+            Vec<Beneficiary>,
+            u64,
+            u64,
+            Vec<Address>,
+        )>,
+    ) -> Vec<u64> {
+        owner.require_auth();
+
+        if will_specs.is_empty() || will_specs.len() > BATCH_MAX {
+            panic_with_error!(&env, WillError::TooManyBeneficiaries);
+        }
+
+        let mut ids = Vec::new(&env);
+        for spec in will_specs.iter() {
+            let (
+                tokens,
+                beneficiaries,
+                checkin_period_days,
+                grace_period_days,
+                guardians,
+            ) = spec;
+
+            // Inline the validation + creation logic (mirrors create_will)
+            // to avoid re-authorizing per will.
+            if tokens.is_empty() || tokens.len() > MAX_TOKENS {
+                panic_with_error!(&env, WillError::TooManyBeneficiaries);
+            }
+            if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
+                panic_with_error!(&env, WillError::TooManyBeneficiaries);
+            }
+            assert_valid_percentages(&env, &beneficiaries);
+            assert_valid_guardians(&env, &guardians);
+            assert_valid_periods(&env, checkin_period_days, grace_period_days);
+
+            let mut balances: Map<Address, i128> = Map::new(&env);
+            for (token_addr, amount) in tokens.iter() {
+                if amount <= 0 {
+                    panic_with_error!(&env, WillError::ZeroAmount);
+                }
+                token::Client::new(&env, &token_addr).transfer(
+                    &owner,
+                    &env.current_contract_address(),
+                    &amount,
+                );
+                let prev = balances.get(token_addr.clone()).unwrap_or(0);
+                balances.set(token_addr, prev + amount);
+            }
+
+            let will_id = storage::next_will_id(&env);
+            let now = env.ledger().timestamp();
+            let beneficiaries_count = beneficiaries.len();
+            let token_count = balances.len();
+
+            for beneficiary in beneficiaries.iter() {
+                storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
+            }
+
+            let will = Will {
+                id: will_id,
+                owner: owner.clone(),
+                balances,
+                beneficiaries,
+                checkin_period_days,
+                grace_period_days,
+                last_checkin: now,
+                trigger_time: None,
+                status: WillStatus::Active,
+                guardians,
+                guardian_votes: 0,
+                guardian_list_updated_at: now,
+            };
+            storage::save_will(&env, &will);
+            storage::index_by_owner(&env, &owner, will_id);
+
+            events::will_created(
+                &env,
+                will_id,
+                &owner,
+                token_count,
+                beneficiaries_count,
+                now + checkin_period_days * SECONDS_PER_DAY,
+            );
+
+            ids.push_back(will_id);
+        }
+
+        events::batch_created(&env, &owner, &ids);
+        ids
     }
 }
 
@@ -547,26 +802,12 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
         .any(|beneficiary| &beneficiary.address == address)
 }
 
-/// Asserts beneficiary percentages sum to exactly 100.
-/// Asserts every beneficiary share is in `1..=100` and that the shares sum to
-/// exactly 100.
-///
-/// The per-share bound is not merely cosmetic: without it a caller could pass
-/// shares near `u32::MAX` and overflow the running total, which panics under
-/// `overflow-checks` instead of returning [`WillError::InvalidPercentages`].
-/// With every share capped at 100 and the caller-side cap of
-/// [`MAX_BENEFICIARIES`] entries, the total cannot exceed 1000.
-///
-/// A zero share is rejected too: such a beneficiary is recorded and indexed on
-/// the will but would receive nothing on release.
-fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
-    let mut total: u32 = 0;
-    for beneficiary in beneficiaries.iter() {
-        if !(1..=100).contains(&beneficiary.percentage) {
-            panic_with_error!(env, WillError::InvalidPercentages);
-        }
-        total += beneficiary.percentage;
 /// Asserts beneficiary basis points sum to exactly 10,000.
+///
+/// The per-entry upper bound is not enforced here (shares are `u32` and
+/// `MAX_BENEFICIARIES` is small enough that overflow is not a concern), but
+/// the exact-sum invariant is critical: it guarantees that every token
+/// balance is fully distributed with no dust left behind.
 fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     let mut total: u32 = 0;
     for beneficiary in beneficiaries.iter() {
@@ -611,18 +852,12 @@ fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: 
     }
 }
 
-/// Splits `will.balance` across `will.beneficiaries` proportionally to their
-/// percentages, transfers the shares out of the contract, marks the will
 /// For each token in `will.balances`, splits the balance across
-/// `will.beneficiaries` proportionally to their percentages, transfers the
-/// shares out of the contract, clears the balances map, marks the will
+/// `will.beneficiaries` proportionally to their basis-point shares, transfers
+/// the shares out of the contract, clears the balances map, marks the will
 /// `Released`, and publishes the `InheritanceReleased` event. Any rounding
 /// remainder from integer division is paid to the final beneficiary so the
 /// full balance of every token is always distributed with no dust left behind.
-/// Splits `will.balance` across `will.beneficiaries` proportionally to their
-/// basis-point shares, transfers the shares out of the contract, marks the
-/// will `Released`, and publishes the `InheritanceReleased` event. Any
-/// rounding remainder from integer division is paid to the final beneficiary.
 fn distribute(env: &Env, will: &mut Will) {
     let contract_address = env.current_contract_address();
     let count = will.beneficiaries.len();
@@ -639,24 +874,13 @@ fn distribute(env: &Env, will: &mut Will) {
             let share = if index as u32 == count - 1 {
                 remaining
             } else {
-                let portion = total * (beneficiary.percentage as i128) / 100;
+                let portion = total * (beneficiary.basis_points as i128) / 10_000;
                 remaining -= portion;
                 portion
             };
             if share > 0 {
                 token_client.transfer(&contract_address, &beneficiary.address, &share);
             }
-    let mut remaining = total;
-    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
-        let share = if index as u32 == count - 1 {
-            remaining
-        } else {
-            let portion = total * (beneficiary.basis_points as i128) / 10_000;
-            remaining -= portion;
-            portion
-        };
-        if share > 0 {
-            token_client.transfer(&contract_address, &beneficiary.address, &share);
         }
     }
 

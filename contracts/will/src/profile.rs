@@ -173,10 +173,11 @@ impl Fixture<'_> {
     /// guardians, returning its id and beneficiary list.
     fn create(&self, guardians: &Vec<Address>) -> (u64, Vec<Beneficiary>) {
         let list = beneficiaries(&self.env, PROFILE_BENEFICIARIES);
+        let tokens: Vec<(Address, i128)> =
+            soroban_sdk::vec![&self.env, (self.token.clone(), 1_000_000_i128)];
         let will_id = self.client.create_will(
             &self.owner,
-            &self.token,
-            &1_000_000,
+            &tokens,
             &list,
             &90,
             &7,
@@ -193,11 +194,6 @@ impl Fixture<'_> {
 
     /// Advances the ledger sequence without moving the clock, ageing every
     /// stored entry towards expiry.
-    ///
-    /// Rent is only charged when an entry's remaining lifetime has fallen
-    /// below `LIFETIME_THRESHOLD`; until then `extend_ttl` is a no-op and the
-    /// rent columns read zero. Ageing the sequence is what makes the rent a
-    /// will actually pays over its lifetime visible.
     fn age(&self, ledgers: u32) {
         self.env.ledger().with_mut(|ledger| {
             ledger.sequence_number += ledgers;
@@ -205,22 +201,22 @@ impl Fixture<'_> {
     }
 }
 
-/// Builds `count` beneficiaries with fresh addresses whose shares sum to 100,
-/// any remainder going to the last entry.
+/// Builds `count` beneficiaries with fresh addresses whose basis points sum
+/// to 10,000, any remainder going to the last entry.
 fn beneficiaries(env: &Env, count: u32) -> Vec<Beneficiary> {
     let mut list = Vec::new(env);
-    let even = 100 / count;
-    let mut allocated = 0;
+    let even = 10_000 / count;
+    let mut allocated: u32 = 0;
     for index in 0..count {
-        let percentage = if index == count - 1 {
-            100 - allocated
+        let basis_points = if index == count - 1 {
+            10_000 - allocated
         } else {
             even
         };
-        allocated += percentage;
+        allocated += basis_points;
         list.push_back(Beneficiary {
             address: Address::generate(env),
-            percentage,
+            basis_points,
         });
     }
     list
@@ -231,22 +227,22 @@ fn beneficiaries(env: &Env, count: u32) -> Vec<Beneficiary> {
 fn reshare(env: &Env, beneficiaries: &Vec<Beneficiary>) -> Vec<Beneficiary> {
     let count = beneficiaries.len();
     let mut list = Vec::new(env);
-    let even = 100 / count;
-    let mut allocated = 0;
+    let even = 10_000 / count;
+    let mut allocated: u32 = 0;
     for (index, beneficiary) in beneficiaries.iter().enumerate() {
         // Shift a point from the first share to the last so the list is
         // genuinely different from the one already stored.
-        let percentage = if index as u32 == count - 1 {
-            100 - allocated
+        let basis_points = if index as u32 == count - 1 {
+            10_000 - allocated
         } else if index == 0 {
             even - 1
         } else {
             even
         };
-        allocated += percentage;
+        allocated += basis_points;
         list.push_back(Beneficiary {
             address: beneficiary.address.clone(),
-            percentage,
+            basis_points,
         });
     }
     list
@@ -285,7 +281,7 @@ fn profile_lifecycle(report: &mut Report) {
     f.client.get_will(&will_id);
     report.record(&f.env, "get_will");
 
-    f.client.top_up(&will_id, &f.owner, &500_000);
+    f.client.top_up(&will_id, &f.owner, &f.token, &500_000);
     report.record(&f.env, "top_up");
 
     f.advance(91 * DAY);
@@ -366,11 +362,11 @@ fn profile_queries(report: &mut Report) {
     let f = fixture();
     let (_, list) = f.create(&Vec::new(&f.env));
 
-    f.client.get_wills_by_owner(&f.owner);
+    f.client.get_wills_by_owner(&f.owner, &None, &100);
     report.record(&f.env, "get_wills_by_owner (1 will)");
 
     f.client
-        .get_wills_by_beneficiary(&list.get_unchecked(0).address);
+        .get_wills_by_beneficiary(&list.get_unchecked(0).address, &None, &100);
     report.record(&f.env, "get_wills_by_beneficiary (1 will)");
 }
 
@@ -406,13 +402,6 @@ fn profile_under_rent_pressure(report: &mut Report) -> (u32, u32) {
 
 /// Ages the ledger until the will's entry is close enough to expiry that the
 /// next `extend_ttl` will actually charge rent.
-///
-/// The will renews itself for 60 days, so the jump has to clear the 30-day
-/// extension threshold. The Stellar Asset Contract only renews balances for 30
-/// days, so a single jump that long archives the token balances first and
-/// every transfer afterwards fails. The jump is therefore taken in two halves
-/// with the balances refreshed in between — a mint touches only the token's
-/// entries, leaving the will's own lifetime ticking down throughout.
 fn age_until_rent_due(f: &Fixture<'_>) {
     const HALF: u32 = 400_000;
 
@@ -432,14 +421,7 @@ fn refresh_token_balances(f: &Fixture<'_>) {
 
 /// Renews the will and token contracts' instance entries so they survive a
 /// long ledger jump.
-///
-/// A contract instance is written once at deployment with a short default
-/// lifetime, and neither contract renews its own. Ageing the ledger far enough
-/// to put a *will* under rent pressure would otherwise archive the instances
-/// first and fail every later call — an artefact of the jump, not of anything
-/// the scenario is measuring.
 fn keep_contracts_alive(f: &Fixture<'_>) {
-    // Longer than the whole jump, so one renewal up front is enough.
     const INSTANCE_TTL: u32 = 2_000_000;
 
     for contract in [&f.client.address, &f.token] {
@@ -453,10 +435,6 @@ fn keep_contracts_alive(f: &Fixture<'_>) {
 }
 
 /// Reads the remaining lifetime, in ledgers, of a will's storage entry.
-///
-/// The rent columns cannot answer whether a *will* was renewed, because token
-/// transfers put their own entries in the same total. Reading the entry's TTL
-/// back addresses the question directly.
 fn will_ttl(f: &Fixture<'_>, will_id: u64) -> u32 {
     f.env.as_contract(&f.client.address, || {
         f.env
@@ -467,16 +445,7 @@ fn will_ttl(f: &Fixture<'_>, will_id: u64) -> u32 {
 }
 
 /// Locks in the ledger footprint of each entry point.
-///
-/// Entry counts are asserted rather than instruction counts: they are the
-/// quantity this pass set out to control, and unlike CPU figures they do not
-/// drift with SDK patch releases, so a failure here means the contract's
-/// storage behaviour actually changed.
 fn assert_footprints(report: &Report) {
-    // `check_in` is the baseline for "touched the will and nothing else": one
-    // will entry written, plus the contract's own instance entry. Several
-    // assertions below are stated against it rather than against a literal, so
-    // they keep describing the same property if the SDK's accounting shifts.
     let will_only = report.row("check_in").write_entries;
 
     assert_eq!(
@@ -485,10 +454,6 @@ fn assert_footprints(report: &Report) {
         "get_will must not write to the ledger"
     );
 
-    // Re-cutting shares between the same heirs moves nobody in or out of the
-    // will, so no reverse index needs rewriting and the cost matches a plain
-    // check-in. Without the membership test in `update_beneficiaries` this is
-    // one extra read and write per beneficiary.
     assert_eq!(
         report
             .row("update_beneficiaries (shares only)")
@@ -506,9 +471,6 @@ fn assert_footprints(report: &Report) {
         "a shares-only update must write fewer entries than a full replacement"
     );
 
-    // Clearing guardian votes is skipped when the counter says there are none,
-    // so both of these cost a check-in rather than a check-in plus one removal
-    // per guardian.
     assert_eq!(
         report
             .row("emergency_checkin (no votes cast)")
@@ -529,8 +491,6 @@ fn assert_footprints(report: &Report) {
         "clearing a real vote must cost more than skipping the clear"
     );
 
-    // Sanity check on the rent-pressure scenario itself: if ageing the ledger
-    // stopped costing rent, the rows below it would prove nothing.
     assert!(
         report.row("check_in (rent due)").rent_ledger_bytes > 0,
         "the rent-pressure scenario must actually leave the will owing rent"

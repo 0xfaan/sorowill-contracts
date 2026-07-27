@@ -88,8 +88,6 @@ pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
         .publish((symbol_short!("guardup"), will_id), owner.clone());
 }
 
-/// Published when the owner tops up the will's balance.
-pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
 /// Published when the owner tops up a specific token's balance in the will.
 pub fn top_up(
     env: &Env,
@@ -111,4 +109,18 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far:
         (symbol_short!("gvote"), will_id),
         (guardian.clone(), votes_so_far),
     );
+}
+
+/// Published when a will is cloned from a template.
+pub fn will_cloned(env: &Env, source_id: u64, new_id: u64, owner: &Address) {
+    env.events().publish(
+        (symbol_short!("cloned"), new_id),
+        (source_id, owner.clone()),
+    );
+}
+
+/// Published when a batch of wills is created in a single transaction.
+pub fn batch_created(env: &Env, owner: &Address, will_ids: &soroban_sdk::Vec<u64>) {
+    env.events()
+        .publish((symbol_short!("batch"), owner.clone()), will_ids.clone());
 }
