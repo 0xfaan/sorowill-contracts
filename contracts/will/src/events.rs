@@ -144,3 +144,9 @@ pub fn will_migrated(env: &Env, will_id: u64, owner: &Address, from_version: u32
         (owner.clone(), from_version, to_version),
     );
 }
+
+/// Published when a Released or Cancelled will is archived.
+pub fn will_archived(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("archived"), will_id), owner.clone());
+}

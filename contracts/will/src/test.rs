@@ -3083,3 +3083,306 @@ fn test_merge_wills_clears_guardian_votes() {
     let merged_will = client.get_will(&will_id_1);
     assert_eq!(merged_will.guardian_votes, 0);
 }
+
+// --- Issue #24 / #25: Audit trail and history tests ---
+
+#[test]
+fn test_will_history_full_lifecycle_release() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // Initial history: one entry for creation
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 1);
+    let t0 = history.get(0).unwrap();
+    assert_eq!(t0.from_status, WillStatus::Active);
+    assert_eq!(t0.to_status, WillStatus::Active);
+    assert_eq!(t0.action, symbol_short!("create"));
+
+    // Trigger
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 2);
+    let t1 = history.get(1).unwrap();
+    assert_eq!(t1.from_status, WillStatus::Active);
+    assert_eq!(t1.to_status, WillStatus::Triggered);
+    assert_eq!(t1.action, symbol_short!("trigger"));
+
+    // Release after grace period
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 3);
+    let t2 = history.get(2).unwrap();
+    assert_eq!(t2.from_status, WillStatus::Triggered);
+    assert_eq!(t2.to_status, WillStatus::Released);
+    assert_eq!(t2.action, symbol_short!("release"));
+}
+
+#[test]
+fn test_will_history_full_lifecycle_cancel() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.cancel_will(&will_id, &owner);
+
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 2);
+    let t1 = history.get(1).unwrap();
+    assert_eq!(t1.from_status, WillStatus::Active);
+    assert_eq!(t1.to_status, WillStatus::Cancelled);
+    assert_eq!(t1.action, symbol_short!("cancel"));
+}
+
+#[test]
+fn test_will_history_emergency_checkin() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    advance_time(&env, 2 * DAY);
+    client.emergency_checkin(&will_id, &owner);
+
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 3);
+    let t2 = history.get(2).unwrap();
+    assert_eq!(t2.from_status, WillStatus::Triggered);
+    assert_eq!(t2.to_status, WillStatus::Active);
+    assert_eq!(t2.action, symbol_short!("emerg"));
+}
+
+#[test]
+fn test_will_history_guardian_trigger() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+    );
+
+    client.guardian_trigger(&will_id, &guardian_1);
+    client.guardian_trigger(&will_id, &guardian_2);
+
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 2);
+    let t1 = history.get(1).unwrap();
+    assert_eq!(t1.from_status, WillStatus::Active);
+    assert_eq!(t1.to_status, WillStatus::Released);
+    assert_eq!(t1.action, symbol_short!("gtrigr"));
+    assert_eq!(t1.actor, guardian_2);
+}
+
+#[test]
+fn test_will_history_empty_for_new_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    let history = client.get_will_history(&will_id);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history.get(0).unwrap().will_id, will_id);
+}
+
+// --- Issue #23: Archive tests ---
+
+#[test]
+fn test_archive_released_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    client.archive_will(&will_id);
+
+    // Will should no longer appear in owner queries
+    let wills = client.get_wills_by_owner(&owner);
+    assert_eq!(wills.len(), 0);
+
+    // Will should no longer appear in beneficiary queries
+    let wills = client.get_wills_by_beneficiary(&beneficiary);
+    assert_eq!(wills.len(), 0);
+}
+
+#[test]
+fn test_archive_cancelled_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.cancel_will(&will_id, &owner);
+    client.archive_will(&will_id);
+
+    let wills = client.get_wills_by_owner(&owner);
+    assert_eq!(wills.len(), 0);
+}
+
+#[test]
+#[should_panic]
+fn test_archive_active_will_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // Trying to archive an Active will should fail
+    client.archive_will(&will_id);
+}
+
+#[test]
+#[should_panic]
+fn test_archive_triggered_will_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    // Trying to archive a Triggered will should fail
+    client.archive_will(&will_id);
+}

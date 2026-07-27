@@ -1,3 +1,4 @@
+use soroban_sdk::{contracttype, Address, Symbol, Vec};
 use soroban_sdk::{contracttype, Address, Map, Vec};
 
 /// A single beneficiary entry: an address and the share of the will's balance
@@ -118,4 +119,27 @@ pub struct Will {
     /// Schema version for this will. Used to track which contract version
     /// wrote this state and enable forward/backward compatible migrations.
     pub schema_version: u32,
+}
+
+/// A single entry in a will's on-chain audit trail, recording one status
+/// transition. The full history of a will can be reconstructed by reading
+/// all entries in insertion order.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WillStatusTransition {
+    /// The will this transition belongs to.
+    pub will_id: u64,
+    /// The status before the transition.
+    pub from_status: WillStatus,
+    /// The status after the transition.
+    pub to_status: WillStatus,
+    /// Unix timestamp (seconds) when the transition occurred.
+    pub timestamp: u64,
+    /// The address that initiated the transition, or the contract address
+    /// for transitions triggered by anyone (e.g. `trigger_will`,
+    /// `release_inheritance`).
+    pub actor: Address,
+    /// A short label describing what caused the transition
+    /// (e.g. "create", "checkin", "trigger", "release").
+    pub action: Symbol,
 }
