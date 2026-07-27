@@ -277,18 +277,36 @@ impl WillContract {
     }
 
     /// Resets the check-in countdown for `will_id`. Must be called by the
-    /// will's owner, and the will must be `Active`.
-    pub fn check_in(env: Env, will_id: u64, owner: Address) {
-        owner.require_auth();
-        let mut will = load_owned(&env, will_id, &owner);
+    /// will's owner or the designated delegate, and the will must be `Active`.
+    pub fn check_in(env: Env, will_id: u64, caller: Address) {
+        caller.require_auth();
+        let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+        assert_owner_or_delegate(&env, &will, &caller);
 
         let now = env.ledger().timestamp();
         will.last_checkin = now;
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
-        events::check_in(&env, will_id, &owner, next_deadline);
+        events::check_in(&env, will_id, &caller, next_deadline);
+    }
+
+    /// Sets or replaces the delegate address for `will_id`. Only callable
+    /// by the owner while the will is `Active`. Pass `None` to clear.
+    pub fn set_delegate(env: Env, will_id: u64, owner: Address, delegate: Option<Address>) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        will.delegate = delegate.clone();
+        storage::save_will(&env, &will);
+
+        if let Some(ref addr) = delegate {
+            events::delegate_set(&env, will_id, &owner, addr);
+        } else {
+            events::delegate_cleared(&env, will_id, &owner);
+        }
     }
 
     /// Batch check-in across multiple wills in a single transaction.
@@ -402,9 +420,15 @@ impl WillContract {
 
     /// Distributes all token balances to beneficiaries proportionally to
     /// their configured percentages. Callable by anyone once the grace
-    /// period has fully elapsed. Any rounding remainder from integer
-    /// division is paid to the final beneficiary so the full balance is
-    /// always distributed with no dust left behind.
+    /// period has fully elapsed.
+    ///
+    /// If a vesting schedule is configured, instead of releasing everything
+    /// at once, this transitions the will to `Vesting` status and records
+    /// the start time. Beneficiaries then call `claim_vested` to unlock
+    /// their share gradually.
+    ///
+    /// If no vesting schedule is configured, behaves exactly as before:
+    /// full lump-sum release.
     ///
     /// In push mode (the default), tokens are transferred directly to each
     /// beneficiary. In pull mode (`pull_distribution = true`), shares are
@@ -425,7 +449,8 @@ impl WillContract {
 
         let trigger_time = will.trigger_time.unwrap_or(0);
         let grace_deadline = trigger_time + will.grace_period_days * SECONDS_PER_DAY;
-        if env.ledger().timestamp() < grace_deadline {
+        let now = env.ledger().timestamp();
+        if now < grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
@@ -1164,6 +1189,8 @@ impl WillContract {
         events::will_archived(&env, will_id, &archived_will.owner);
     }
 }
+
+// ── Private helpers ─────────────────────────────────────────────────────────
 
 /// Loads a will by id, panicking with [`WillError::WillNotFound`] if it does not exist.
 fn load_will(env: &Env, will_id: u64) -> Will {

@@ -139,6 +139,8 @@ fn test_create_will_success() {
     assert!(!will.is_native);
     assert_eq!(token.balance(&owner), 1_000_000_000 - 1_000_000);
     assert_eq!(token.balance(&client.address), 1_000_000);
+    assert!(will.delegate.is_none());
+    assert!(will.vesting.is_none());
 }
 
 #[test]
@@ -739,10 +741,22 @@ fn test_update_guardians_rejects_too_many() {
         &owner,
         &vec![
             &env,
-            Address::generate(&env),
-            Address::generate(&env),
-            Address::generate(&env),
-            Address::generate(&env),
+            GuardianEntry {
+                address: Address::generate(&env),
+                tier: GuardianTier::Primary,
+            },
+            GuardianEntry {
+                address: Address::generate(&env),
+                tier: GuardianTier::Primary,
+            },
+            GuardianEntry {
+                address: Address::generate(&env),
+                tier: GuardianTier::Backup,
+            },
+            GuardianEntry {
+                address: Address::generate(&env),
+                tier: GuardianTier::Backup,
+            },
         ],
     );
     client.update_guardians(&will_id, &owner, &vec![

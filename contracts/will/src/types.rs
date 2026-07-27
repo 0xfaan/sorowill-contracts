@@ -31,6 +31,16 @@ pub struct Guardian {
 /// Active --(missed check-in)--> Triggered --(grace period expires)--> Released --(close_will)--> Settled
 ///   |                               |
 ///   |--(cancel_will)--> Cancelled   |--(emergency_checkin)--> Active
+///   |--(partial_release)--> Active  (balance reduced, subset paid)
+/// ```
+///
+/// When a vesting schedule is configured, the lifecycle after grace-period
+/// expiry is:
+///
+/// ```text
+/// Triggered --(grace period expires + vesting configured)--> Vesting
+/// Vesting --(claim_vested)--> Vesting  (partial unlock)
+/// Vesting --(final claim)--> Released
 /// ```
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,7 +50,7 @@ pub enum WillStatus {
     /// The owner missed a check-in deadline; the grace period is running.
     Triggered,
     /// The grace period expired (or guardians reached quorum) and funds were
-    /// distributed to beneficiaries.
+    /// distributed to beneficiaries (lump sum or final vested claim).
     Released,
     /// The owner cancelled the will and withdrew the remaining balance.
     Cancelled,
