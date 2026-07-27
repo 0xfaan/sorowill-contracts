@@ -1,3 +1,4 @@
+use soroban_sdk::{contracttype, Address, Symbol, Vec};
 use soroban_sdk::{contracttype, Address, Map, Vec};
 
 /// A single beneficiary entry: an address and the share of the will's balance
@@ -13,10 +14,21 @@ pub struct Beneficiary {
     pub basis_points: u32,
 }
 
+/// A guardian entry: an address paired with a vote weight.
+///
+/// Guardians with higher weights count for more when reaching quorum.
+/// If all guardians have weight 1, the threshold is a simple majority count.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Guardian {
+    pub address: Address,
+    pub weight: u32,
+}
+
 /// Lifecycle state of a will.
 ///
 /// ```text
-/// Active --(missed check-in)--> Triggered --(grace period expires)--> Released
+/// Active --(missed check-in)--> Triggered --(grace period expires)--> Released --(close_will)--> Settled
 ///   |                               |
 ///   |--(cancel_will)--> Cancelled   |--(emergency_checkin)--> Active
 /// ```
@@ -32,6 +44,8 @@ pub enum WillStatus {
     Released,
     /// The owner cancelled the will and withdrew the remaining balance.
     Cancelled,
+    /// A Released will that has been explicitly closed/archived by the owner.
+    Settled,
 }
 
 /// Aggregate protocol statistics that can be queried directly on-chain.
@@ -90,6 +104,12 @@ pub struct Will {
     pub trigger_time: Option<u64>,
     /// Current lifecycle state of the will.
     pub status: WillStatus,
+    /// Optional guardians (up to 3) who may force an early release
+    /// via a weight-based quorum using `guardian_trigger`.
+    pub guardians: Vec<Guardian>,
+    /// Accumulated weight of guardian votes cast in the current cycle.
+    /// Release triggers when this reaches `GUARDIAN_THRESHOLD`.
+    pub guardian_vote_weight: u32,
     /// Optional guardian addresses (up to 3) who may force an early release
     /// via a 2-of-N vote using `guardian_trigger`.
     pub guardians: Vec<Address>,
@@ -101,4 +121,30 @@ pub struct Will {
     /// elapsed since this timestamp, preventing a compromised owner from
     /// swapping guardians right before a malicious action.
     pub guardian_list_updated_at: u64,
+    /// Schema version for this will. Used to track which contract version
+    /// wrote this state and enable forward/backward compatible migrations.
+    pub schema_version: u32,
+}
+
+/// A single entry in a will's on-chain audit trail, recording one status
+/// transition. The full history of a will can be reconstructed by reading
+/// all entries in insertion order.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WillStatusTransition {
+    /// The will this transition belongs to.
+    pub will_id: u64,
+    /// The status before the transition.
+    pub from_status: WillStatus,
+    /// The status after the transition.
+    pub to_status: WillStatus,
+    /// Unix timestamp (seconds) when the transition occurred.
+    pub timestamp: u64,
+    /// The address that initiated the transition, or the contract address
+    /// for transitions triggered by anyone (e.g. `trigger_will`,
+    /// `release_inheritance`).
+    pub actor: Address,
+    /// A short label describing what caused the transition
+    /// (e.g. "create", "checkin", "trigger", "release").
+    pub action: Symbol,
 }
