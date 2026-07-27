@@ -29,7 +29,7 @@ mod test;
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus};
+pub use types::{Beneficiary, Guardian, Will, WillStatus};
 
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
@@ -58,7 +58,9 @@ impl WillContract {
     /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose percentages sum to exactly 100.
     /// - `checkin_period_days`: how many days the owner may go without checking in.
     /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
-    /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
+    /// - `guardians`: 0 to `MAX_GUARDIANS` guardians that may jointly force an early release.
+    ///   Each guardian has a vote weight; the accumulated weight must reach
+    ///   `GUARDIAN_THRESHOLD` to trigger.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -77,7 +79,7 @@ impl WillContract {
         beneficiaries: Vec<Beneficiary>,
         checkin_period_days: u64,
         grace_period_days: u64,
-        guardians: Vec<Address>,
+        guardians: Vec<Guardian>,
     ) -> u64 {
         owner.require_auth();
 
@@ -114,7 +116,7 @@ impl WillContract {
             trigger_time: None,
             status: WillStatus::Active,
             guardians,
-            guardian_votes: 0,
+            guardian_vote_weight: 0,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -200,7 +202,7 @@ impl WillContract {
         will.status = WillStatus::Active;
         will.trigger_time = None;
         will.last_checkin = now;
-        will.guardian_votes = 0;
+        will.guardian_vote_weight = 0;
         storage::reset_guardian_votes(&env, will_id, &will.guardians);
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
@@ -262,6 +264,29 @@ impl WillContract {
         events::will_cancelled(&env, will_id, &owner, refund);
     }
 
+    /// Explicitly marks a `Released` will as `Settled`, completing the
+    /// archival step separate from the payout moment. Only the owner may
+    /// close a will, and only after it has been released.
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotReleased`] if the will is not `Released`.
+    pub fn close_will(env: Env, will_id: u64, owner: Address) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(
+            &env,
+            &will,
+            WillStatus::Released,
+            WillError::WillNotReleased,
+        );
+
+        will.status = WillStatus::Settled;
+        storage::save_will(&env, &will);
+
+        events::will_closed(&env, will_id, &owner);
+    }
+
     /// Replaces the beneficiary list for `will_id`. Only possible while the
     /// will is `Active`. The new percentages must sum to exactly 100.
     ///
@@ -307,7 +332,7 @@ impl WillContract {
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
     ///   guardians are supplied.
-    pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Address>) {
+    pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Guardian>) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
@@ -318,7 +343,7 @@ impl WillContract {
 
         storage::reset_guardian_votes(&env, will_id, &will.guardians);
         will.guardians = guardians;
-        will.guardian_votes = 0;
+        will.guardian_vote_weight = 0;
         storage::save_will(&env, &will);
 
         events::guardians_updated(&env, will_id, &owner);
@@ -372,6 +397,24 @@ impl WillContract {
         wills
     }
 
+    /// Returns the full state of every will owned by `owner` with the given `status`.
+    pub fn get_wills_by_owner_and_status(
+        env: Env,
+        owner: Address,
+        status: WillStatus,
+    ) -> Vec<Will> {
+        let ids = storage::get_owner_wills(&env, &owner);
+        let mut wills = Vec::new(&env);
+        for id in ids.iter() {
+            if let Ok(will) = storage::load_will(&env, id) {
+                if will.status == status {
+                    wills.push_back(will);
+                }
+            }
+        }
+        wills
+    }
+
     /// Returns the full state of every will `beneficiary` is named in.
     pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
@@ -385,10 +428,10 @@ impl WillContract {
     }
 
     /// Casts a guardian vote to force an early release of `will_id`, for use
-    /// when the owner is known to be incapacitated. Once
-    /// [`GUARDIAN_THRESHOLD`] distinct guardians have voted, the balance is
-    /// immediately distributed to beneficiaries, bypassing the check-in and
-    /// grace-period flow entirely.
+    /// when the owner is known to be incapacitated. Each guardian's configured
+    /// weight is added to the accumulated vote weight; once it reaches
+    /// [`GUARDIAN_THRESHOLD`], the balance is immediately distributed to
+    /// beneficiaries, bypassing the check-in and grace-period flow entirely.
     ///
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
@@ -399,20 +442,21 @@ impl WillContract {
         let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        if !will.guardians.contains(&guardian) {
-            panic_with_error!(&env, WillError::NotGuardian);
-        }
+        let weight = match will.guardians.iter().find(|g| g.address == guardian) {
+            Some(g) => g.weight,
+            None => panic_with_error!(&env, WillError::NotGuardian),
+        };
         if storage::has_guardian_voted(&env, will_id, &guardian) {
             panic_with_error!(&env, WillError::AlreadyVoted);
         }
 
         storage::set_guardian_voted(&env, will_id, &guardian);
-        will.guardian_votes += 1;
+        will.guardian_vote_weight += weight;
         storage::save_will(&env, &will);
 
-        events::guardian_voted(&env, will_id, &guardian, will.guardian_votes);
+        events::guardian_voted(&env, will_id, &guardian, weight, will.guardian_vote_weight);
 
-        if will.guardian_votes >= GUARDIAN_THRESHOLD {
+        if will.guardian_vote_weight >= GUARDIAN_THRESHOLD {
             distribute(&env, &mut will);
         }
     }
@@ -455,15 +499,18 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
 
 /// Splits `will.balance` across `will.beneficiaries` proportionally to their
 /// percentages, transfers the shares out of the contract, marks the will
-/// `Released`, and publishes the `InheritanceReleased` event. Any rounding
-/// remainder from integer division is paid to the final beneficiary.
+/// `Released`, and publishes the `InheritanceReleased` event with a full
+/// per-beneficiary breakdown. Any rounding remainder from integer division
+/// is paid to the final beneficiary.
 fn distribute(env: &Env, will: &mut Will) {
     let token_client = token::Client::new(env, &will.token);
     let contract_address = env.current_contract_address();
     let total = will.balance;
     let count = will.beneficiaries.len();
+    let guardian_triggered = will.status == WillStatus::Active;
 
     let mut remaining = total;
+    let mut breakdown: Vec<(Address, u32, i128)> = Vec::new(env);
     for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
         let share = if index as u32 == count - 1 {
             remaining
@@ -475,11 +522,12 @@ fn distribute(env: &Env, will: &mut Will) {
         if share > 0 {
             token_client.transfer(&contract_address, &beneficiary.address, &share);
         }
+        breakdown.push_back((beneficiary.address.clone(), beneficiary.percentage, share));
     }
 
     will.balance = 0;
     will.status = WillStatus::Released;
     storage::save_will(env, will);
 
-    events::inheritance_released(env, will.id, total, count);
+    events::inheritance_released(env, will.id, total, &breakdown, guardian_triggered);
 }

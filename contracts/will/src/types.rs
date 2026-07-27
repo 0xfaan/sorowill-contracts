@@ -11,10 +11,21 @@ pub struct Beneficiary {
     pub percentage: u32,
 }
 
+/// A guardian entry: an address paired with a vote weight.
+///
+/// Guardians with higher weights count for more when reaching quorum.
+/// If all guardians have weight 1, the threshold is a simple majority count.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Guardian {
+    pub address: Address,
+    pub weight: u32,
+}
+
 /// Lifecycle state of a will.
 ///
 /// ```text
-/// Active --(missed check-in)--> Triggered --(grace period expires)--> Released
+/// Active --(missed check-in)--> Triggered --(grace period expires)--> Released --(close_will)--> Settled
 ///   |                               |
 ///   |--(cancel_will)--> Cancelled   |--(emergency_checkin)--> Active
 /// ```
@@ -30,6 +41,8 @@ pub enum WillStatus {
     Released,
     /// The owner cancelled the will and withdrew the remaining balance.
     Cancelled,
+    /// A Released will that has been explicitly closed/archived by the owner.
+    Settled,
 }
 
 /// The full on-chain state of a single will.
@@ -58,10 +71,10 @@ pub struct Will {
     pub trigger_time: Option<u64>,
     /// Current lifecycle state of the will.
     pub status: WillStatus,
-    /// Optional guardian addresses (up to 3) who may force an early release
-    /// via a 2-of-N vote using `guardian_trigger`.
-    pub guardians: Vec<Address>,
-    /// Number of distinct guardians who have voted to trigger the current
-    /// guardian-release cycle.
-    pub guardian_votes: u32,
+    /// Optional guardians (up to 3) who may force an early release
+    /// via a weight-based quorum using `guardian_trigger`.
+    pub guardians: Vec<Guardian>,
+    /// Accumulated weight of guardian votes cast in the current cycle.
+    /// Release triggers when this reaches `GUARDIAN_THRESHOLD`.
+    pub guardian_vote_weight: u32,
 }

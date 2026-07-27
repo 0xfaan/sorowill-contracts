@@ -4,7 +4,7 @@
 //! off-chain indexers (such as the SoroWill SDK/app) can reconstruct will
 //! history without re-simulating transactions.
 
-use soroban_sdk::{symbol_short, Address, Env};
+use soroban_sdk::{symbol_short, Address, Env, Vec};
 
 /// Published when a new will is created.
 pub fn will_created(
@@ -54,11 +54,12 @@ pub fn inheritance_released(
     env: &Env,
     will_id: u64,
     total_released: i128,
-    beneficiaries_count: u32,
+    breakdown: &Vec<(Address, u32, i128)>,
+    guardian_triggered: bool,
 ) {
     env.events().publish(
         (symbol_short!("released"), will_id),
-        (total_released, beneficiaries_count),
+        (total_released, guardian_triggered, breakdown.clone()),
     );
 }
 
@@ -80,6 +81,14 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
+/// Published when the owner closes a Released will, marking it Settled.
+pub fn will_closed(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("closed"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(
@@ -89,9 +98,9 @@ pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balanc
 }
 
 /// Published each time a guardian votes to trigger an early release.
-pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far: u32) {
+pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, weight: u32, total_weight: u32) {
     env.events().publish(
         (symbol_short!("gvote"), will_id),
-        (guardian.clone(), votes_so_far),
+        (guardian.clone(), weight, total_weight),
     );
 }
