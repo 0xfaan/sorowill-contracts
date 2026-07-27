@@ -1,14 +1,16 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address, Map, Vec};
 
-/// A single beneficiary entry: an address and the percentage of the will's
-/// balance it is entitled to receive when the inheritance is released.
+/// A single beneficiary entry: an address and the share of the will's balance
+/// it is entitled to receive when the inheritance is released, expressed in
+/// basis points (1 bp = 0.01 %).
 ///
-/// Percentages across all beneficiaries of a will must sum to exactly 100.
+/// `basis_points` across all beneficiaries of a will must sum to exactly
+/// 10,000 (i.e. 100 %).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Beneficiary {
     pub address: Address,
-    pub percentage: u32,
+    pub basis_points: u32,
 }
 
 /// Lifecycle state of a will.
@@ -60,11 +62,21 @@ pub struct Will {
     pub id: u64,
     /// The address that created and funds the will.
     pub owner: Address,
+    /// The token contract address (e.g. a USDC Stellar Asset Contract, or the
+    /// native XLM asset address when `is_native` is true) held by the will.
+    /// Map of token contract address → amount currently locked in the will,
+    /// in each token's base units. A will may hold any number of distinct
+    /// SEP-41 compliant tokens simultaneously.
+    pub balances: Map<Address, i128>,
+    /// The beneficiaries and their percentage shares. Always sums to 100.
     /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
     pub token: Address,
+    /// Whether the held asset is native XLM (as opposed to a token contract).
+    /// When `true`, transfers use `env.transfer()` instead of the token client.
+    pub is_native: bool,
     /// The amount of `token` currently locked in the will, in the token's base units.
     pub balance: i128,
-    /// The beneficiaries and their percentage shares. Always sums to 100.
+    /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
     /// How many days the owner may go without checking in before the will
     /// can be triggered.
@@ -84,4 +96,7 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Schema version for this will. Used to track which contract version
+    /// wrote this state and enable forward/backward compatible migrations.
+    pub schema_version: u32,
 }
