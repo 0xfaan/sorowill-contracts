@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address, Map, Vec};
 
 /// A single beneficiary entry: an address and the share of the will's balance
 /// it is entitled to receive when the inheritance is released, expressed in
@@ -44,6 +44,12 @@ pub struct Will {
     pub owner: Address,
     /// The token contract address (e.g. a USDC Stellar Asset Contract, or the
     /// native XLM asset address when `is_native` is true) held by the will.
+    /// Map of token contract address → amount currently locked in the will,
+    /// in each token's base units. A will may hold any number of distinct
+    /// SEP-41 compliant tokens simultaneously.
+    pub balances: Map<Address, i128>,
+    /// The beneficiaries and their percentage shares. Always sums to 100.
+    /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
     pub token: Address,
     /// Whether the held asset is native XLM (as opposed to a token contract).
     /// When `true`, transfers use `env.transfer()` instead of the token client.
