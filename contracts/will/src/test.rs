@@ -792,6 +792,7 @@ fn test_update_guardians_resets_votes() {
     client.update_guardians(&will_id, &owner, &vec![&env, g2.clone()]);
     assert_eq!(client.get_will(&will_id).guardian_votes, 0);
 
+    client.accept_guardian_role(&will_id, &guardian_1);
     client.guardian_trigger(&will_id, &guardian_1);
     assert_eq!(client.get_will(&will_id).guardian_vote_weight, 1);
 
@@ -1034,6 +1035,8 @@ fn test_guardian_trigger_requires_two_votes() {
     client.guardian_trigger(&will_id, &g1);
     assert_eq!(client.get_will(&will_id).guardian_votes, 1);
 
+    client.accept_guardian_role(&will_id, &guardian_1);
+    client.guardian_trigger(&will_id, &guardian_1);
     client.guardian_trigger(&will_id, &guardian_1, &GuardianVoteReason::Incapacitated);
     let will = client.get_will(&will_id);
     assert_eq!(will.status, WillStatus::Active);
@@ -1681,6 +1684,8 @@ fn test_native_rounding_remainder() {
         &owner,
         &100, // 100 XLM
         &vec![&env],
+        &false,
+        &None,
         &0,
         &vec![&env],
     );
@@ -3473,6 +3478,14 @@ fn test_archive_triggered_will_rejected() {
     client.archive_will(&will_id);
 }
 
+// ── Issue #11: Pull-based beneficiary claim tests ────────────────────────────
+
+/// Pull-mode distribute stores claimable shares instead of transferring tokens.
+#[test]
+fn test_pull_distribution_stores_shares() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
 // ── #15: Time-weighted guardian vote expiry tests ────────────────────────────
 
 #[test]
@@ -3487,6 +3500,12 @@ fn test_guardian_vote_expiry_defaults_to_grace_period() {
         &vec![
             &env,
             Beneficiary {
+                address: beneficiary_a.clone(),
+                basis_points: 6_000,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                basis_points: 4_000,
                 address: beneficiary,
                 basis_points: 10_000,
             },
@@ -3521,6 +3540,31 @@ fn test_guardian_vote_expiry_custom_value() {
         &90,
         &7,
         &vec![&env],
+        &true,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    // Tokens stay in the contract — not transferred to beneficiaries.
+    assert_eq!(token.balance(&beneficiary_a), 0);
+    assert_eq!(token.balance(&beneficiary_b), 0);
+    assert_eq!(token.balance(&client.address), 1_000_000);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
+    assert_eq!(will.balance, 0);
+}
+
+/// Beneficiaries can independently claim their shares.
+#[test]
+fn test_claim_share_transfers_tokens() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
         &3,
         &vec![&env],
     );
@@ -3588,6 +3632,12 @@ fn test_same_guardian_cannot_revote_before_expiry() {
         &vec![
             &env,
             Beneficiary {
+                address: beneficiary_a.clone(),
+                basis_points: 6_000,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                basis_points: 4_000,
                 address: beneficiary,
                 basis_points: 10_000,
             },
@@ -3627,6 +3677,34 @@ fn test_same_guardian_can_revote_after_expiry() {
         ],
         &90,
         &7,
+        &vec![&env],
+        &true,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    // Beneficiary A claims first.
+    client.claim_share(&will_id, &beneficiary_a);
+    assert_eq!(token.balance(&beneficiary_a), 600_000);
+    assert_eq!(token.balance(&client.address), 400_000);
+
+    // Beneficiary B claims second.
+    client.claim_share(&will_id, &beneficiary_b);
+    assert_eq!(token.balance(&beneficiary_b), 400_000);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+/// A non-beneficiary cannot claim a share.
+#[test]
+#[should_panic]
+fn test_claim_share_rejects_non_beneficiary() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let non_beneficiary = Address::generate(&env);
         &vec![&env, guardian_1.clone()],
         &2,
         &vec![&env],
@@ -3662,6 +3740,25 @@ fn test_guardian_vote_reason_stored_and_emitted() {
         ],
         &90,
         &7,
+        &vec![&env],
+        &true,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    client.claim_share(&will_id, &non_beneficiary);
+}
+
+/// A beneficiary cannot claim twice.
+#[test]
+#[should_panic]
+fn test_claim_share_rejects_already_claimed() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
         &vec![&env, guardian_1.clone()],
         &0,
         &vec![&env],
@@ -3704,12 +3801,34 @@ fn test_all_guardian_reason_codes() {
         &vec![
             &env,
             Beneficiary {
+                address: beneficiary.clone(),
                 address: beneficiary,
                 basis_points: 10_000,
             },
         ],
         &90,
         &7,
+        &vec![&env],
+        &true,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    client.claim_share(&will_id, &beneficiary);
+    client.claim_share(&will_id, &beneficiary);
+}
+
+/// Pull-mode with three-way fractional split: each beneficiary claims independently.
+#[test]
+fn test_pull_distribution_fractional_split() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let beneficiary_c = Address::generate(&env);
         &vec![&env, guardian_1.clone(), guardian_2.clone()],
         &0,
         &vec![&env],
@@ -3776,6 +3895,22 @@ fn test_release_tier_first_milestone() {
             &env,
             Beneficiary {
                 address: beneficiary_a.clone(),
+                basis_points: 5_000,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                basis_points: 3_333,
+            },
+            Beneficiary {
+                address: beneficiary_c.clone(),
+                basis_points: 1_667,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &true,
+        &None,
                 basis_points: 6_000,
             },
             Beneficiary {
@@ -3802,6 +3937,32 @@ fn test_release_tier_first_milestone() {
 
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    // All tokens stay in the contract.
+    assert_eq!(token.balance(&client.address), 1_000_000);
+
+    // Each beneficiary claims their share.
+    client.claim_share(&will_id, &beneficiary_a);
+    assert_eq!(token.balance(&beneficiary_a), 500_000);
+
+    client.claim_share(&will_id, &beneficiary_b);
+    assert_eq!(token.balance(&beneficiary_b), 333_300);
+
+    client.claim_share(&will_id, &beneficiary_c);
+    assert_eq!(token.balance(&beneficiary_c), 166_700);
+
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+/// Guardian trigger also works with pull-mode distribution.
+#[test]
+fn test_guardian_trigger_pull_distribution() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
 
     advance_time(&env, 8 * DAY);
     client.release_tier(&will_id, &0);
@@ -3833,6 +3994,38 @@ fn test_release_tier_both_milestones() {
             },
         ],
         &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+        &true,
+        &None,
+    );
+
+    client.accept_guardian_role(&will_id, &guardian_1);
+    client.accept_guardian_role(&will_id, &guardian_2);
+    client.guardian_trigger(&will_id, &guardian_1);
+    client.guardian_trigger(&will_id, &guardian_2);
+
+    // Tokens stay in contract (pull mode).
+    assert_eq!(token.balance(&beneficiary), 0);
+    assert_eq!(token.balance(&client.address), 1_000_000);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
+
+    // Beneficiary can claim.
+    client.claim_share(&will_id, &beneficiary);
+    assert_eq!(token.balance(&beneficiary), 1_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+// ── Issue #12: Fallback beneficiary tests ────────────────────────────────────
+
+/// Owner can set and read the fallback beneficiary.
+#[test]
+fn test_set_fallback_beneficiary() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let fallback = Address::generate(&env);
         &14,
         &vec![&env],
         &0,
@@ -3883,6 +4076,27 @@ fn test_release_tier_before_deadline() {
             },
         ],
         &90,
+        &7,
+        &vec![&env],
+        &false,
+        &None,
+    );
+
+    assert_eq!(client.get_fallback_beneficiary(&will_id), None);
+
+    client.set_fallback_beneficiary(&will_id, &owner, &Some(fallback.clone()));
+    assert_eq!(client.get_fallback_beneficiary(&will_id), Some(fallback.clone()));
+
+    client.set_fallback_beneficiary(&will_id, &owner, &None);
+    assert_eq!(client.get_fallback_beneficiary(&will_id), None);
+}
+
+/// Fallback can be set at will creation.
+#[test]
+fn test_create_will_with_fallback() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let fallback = Address::generate(&env);
         &14,
         &vec![&env],
         &0,
@@ -3924,6 +4138,26 @@ fn test_release_tier_already_released() {
             },
         ],
         &90,
+        &7,
+        &vec![&env],
+        &false,
+        &Some(fallback.clone()),
+    );
+
+    assert_eq!(client.get_fallback_beneficiary(&will_id), Some(fallback));
+    let will = client.get_will(&will_id);
+    assert_eq!(will.fallback_beneficiary, Some(fallback));
+}
+
+// ── Issue #13: Guardian consent flow tests ───────────────────────────────────
+
+/// Guardian must accept before voting.
+#[test]
+fn test_guardian_must_accept_before_voting() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
         &14,
         &vec![&env],
         &0,
@@ -3965,6 +4199,28 @@ fn test_release_tier_out_of_range() {
             },
         ],
         &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+        &false,
+        &None,
+    );
+
+    // Guardian 1 tries to vote without accepting — must panic.
+    let result = client.try_guardian_trigger(&will_id, &guardian_1);
+    assert!(result.is_err());
+
+    // Guardian 1 accepts, then votes successfully.
+    client.accept_guardian_role(&will_id, &guardian_1);
+    client.guardian_trigger(&will_id, &guardian_1);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+}
+
+/// Guardian can accept their role.
+#[test]
+fn test_accept_guardian_role() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
         &14,
         &vec![&env],
         &0,
@@ -4006,6 +4262,27 @@ fn test_release_tier_no_grace_tiers() {
         ],
         &90,
         &7,
+        &vec![&env, guardian.clone()],
+        &false,
+        &None,
+    );
+
+    client.accept_guardian_role(&will_id, &guardian);
+
+    // Accepting again must panic.
+    let result = client.try_accept_guardian_role(&will_id, &guardian);
+    assert!(result.is_err());
+}
+
+/// Guardian trigger rejects unaccepted guardian.
+#[test]
+#[should_panic]
+fn test_guardian_trigger_rejects_unaccepted() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
         &vec![&env],
         &0,
         &vec![&env],
@@ -4035,6 +4312,25 @@ fn test_invalid_grace_tiers_bp_not_10000() {
             },
         ],
         &90,
+        &7,
+        &vec![&env, guardian.clone()],
+        &false,
+        &None,
+    );
+
+    // Must panic because guardian has not accepted.
+    client.guardian_trigger(&will_id, &guardian);
+}
+
+/// Non-guardian cannot accept guardian role.
+#[test]
+#[should_panic]
+fn test_accept_guardian_role_rejects_non_guardian() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let non_guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
         &14,
         &vec![&env],
         &0,
@@ -4070,6 +4366,25 @@ fn test_invalid_grace_tiers_not_ascending() {
             },
         ],
         &90,
+        &7,
+        &vec![&env],
+        &false,
+        &None,
+    );
+
+    client.accept_guardian_role(&will_id, &non_guardian);
+}
+
+/// update_guardians resets consent for old guardians and sets Pending for new ones.
+#[test]
+fn test_update_guardians_resets_consent() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_1 = Address::generate(&env);
+    let guardian_2 = Address::generate(&env);
+    let guardian_3 = Address::generate(&env);
+
+    let will_id = client.create_will(
         &14,
         &vec![&env],
         &0,
@@ -4106,6 +4421,61 @@ fn test_invalid_grace_tiers_beyond_grace_period() {
         ],
         &90,
         &7,
+        &vec![&env, guardian_1.clone()],
+        &false,
+        &None,
+    );
+
+    // Guardian 1 accepts.
+    client.accept_guardian_role(&will_id, &guardian_1);
+
+    // Replace with guardian_2 — guardian_1's consent should be cleared.
+    client.update_guardians(&will_id, &owner, &vec![&env, guardian_2.clone()]);
+
+    // Guardian 1 is no longer a guardian, so accepting must fail.
+    let result = client.try_accept_guardian_role(&will_id, &guardian_1);
+    assert!(result.is_err());
+
+    // Guardian 2 is named but has not accepted, so voting must fail.
+    let result = client.try_guardian_trigger(&will_id, &guardian_2);
+    assert!(result.is_err());
+
+    // Guardian 2 accepts, then votes successfully.
+    client.accept_guardian_role(&will_id, &guardian_2);
+    client.guardian_trigger(&will_id, &guardian_2);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+
+    // Add guardian_3 alongside guardian_2 — guardian_2's consent should persist.
+    client.update_guardians(
+        &will_id,
+        &owner,
+        &vec![&env, guardian_2.clone(), guardian_3.clone()],
+    );
+
+    // Guardian 2 should still be accepted (consent was not cleared for them
+    // because they were re-added). Actually, update_guardians clears ALL old
+    // consents and resets new ones to Pending. So guardian_2 must re-accept.
+    let result = client.try_guardian_trigger(&will_id, &guardian_2);
+    assert!(result.is_err());
+}
+
+// ── Issue #14: Guardian self-initiated replacement request tests ──────────────
+
+/// Guardian can request replacement.
+#[test]
+fn test_request_guardian_replacement() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
         &vec![&env],
         &0,
         &vec![
@@ -4243,6 +4613,21 @@ fn test_batch_checkin_multiple_wills() {
         ],
         &90,
         &7,
+        &vec![&env, guardian.clone()],
+        &false,
+        &None,
+    );
+
+    client.request_guardian_replacement(&will_id, &guardian);
+}
+
+/// Non-guardian cannot request replacement.
+#[test]
+#[should_panic]
+fn test_request_guardian_replacement_rejects_non_guardian() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let non_guardian = Address::generate(&env);
         &vec![&env],
         &0,
         &vec![&env],
@@ -4299,6 +4684,29 @@ fn test_batch_checkin_single_will() {
         &90,
         &7,
         &vec![&env],
+        &false,
+        &None,
+    );
+
+    client.request_guardian_replacement(&will_id, &non_guardian);
+}
+
+/// Cannot request replacement on a non-Active will.
+#[test]
+#[should_panic]
+fn test_request_guardian_replacement_rejected_while_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
         &0,
         &vec![&env],
     );
@@ -4330,6 +4738,15 @@ fn test_batch_checkin_rejects_non_active_will() {
         ],
         &90,
         &7,
+        &vec![&env, guardian.clone()],
+        &false,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    client.request_guardian_replacement(&will_id, &guardian);
         &vec![&env],
         &0,
         &vec![&env],

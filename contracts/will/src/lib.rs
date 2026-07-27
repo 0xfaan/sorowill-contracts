@@ -21,6 +21,15 @@
 //! Optionally, up to three guardians may be named on a will; any two of them
 //! calling [`WillContract::guardian_trigger`] force an immediate release,
 //! bypassing the check-in/grace-period flow entirely (e.g. if the owner is
+//! known to be incapacitated). Guardians must first accept their role via
+//! [`WillContract::accept_guardian_role`] before they can vote.
+//!
+//! Two distribution modes are supported:
+//! - **Push mode** (default): `distribute` transfers tokens directly to each
+//!   beneficiary in a single call.
+//! - **Pull mode**: `distribute` stores each beneficiary's share as a
+//!   claimable amount. Beneficiaries call [`WillContract::claim_share`]
+//!   independently to withdraw their share.
 //! known to be incapacitated). Guardian votes expire after a configurable
 //! window so stale votes cannot combine with fresh ones.
 //!
@@ -213,6 +222,14 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
+        for guardian in guardians.iter() {
+            storage::set_guardian_consent(&env, will_id, &guardian, &GuardianConsent::Pending);
+        }
+
+        if let Some(ref fb) = fallback_beneficiary {
+            storage::set_fallback_beneficiary(&env, will_id, fb);
+        }
+
         let will = Will {
             id: will_id,
             owner: owner.clone(),
@@ -389,6 +406,11 @@ impl WillContract {
     /// division is paid to the final beneficiary so the full balance is
     /// always distributed with no dust left behind.
     ///
+    /// In push mode (the default), tokens are transferred directly to each
+    /// beneficiary. In pull mode (`pull_distribution = true`), shares are
+    /// stored in claimable-shares storage and beneficiaries must call
+    /// `claim_share` to withdraw.
+    ///
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
@@ -547,7 +569,8 @@ impl WillContract {
 
     /// Replaces the guardian list for `will_id`. Only possible while the will
     /// is `Active`. Any votes cast against the previous guardian list are
-    /// cleared so every updated list starts a fresh voting cycle.
+    /// cleared so every updated list starts a fresh voting cycle. Consent
+    /// entries for the old guardians are also cleared.
     ///
     /// Records the current timestamp as `guardian_list_updated_at` so that
     /// [`guardian_trigger`] enforces a cooldown before the new list takes
