@@ -145,6 +145,18 @@ pub fn will_migrated(env: &Env, will_id: u64, owner: &Address, from_version: u32
     );
 }
 
+/// Published when a will is cloned from a template.
+pub fn will_cloned(env: &Env, source_id: u64, new_id: u64, owner: &Address) {
+    env.events().publish(
+        (symbol_short!("cloned"), new_id),
+        (source_id, owner.clone()),
+    );
+}
+
+/// Published when a batch of wills is created in a single transaction.
+pub fn batch_created(env: &Env, owner: &Address, will_ids: &soroban_sdk::Vec<u64>) {
+    env.events()
+        .publish((symbol_short!("batch"), owner.clone()), will_ids.clone());
 /// Published when a Released or Cancelled will is archived.
 pub fn will_archived(env: &Env, will_id: u64, owner: &Address) {
     env.events()

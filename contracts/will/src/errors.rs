@@ -21,7 +21,7 @@ pub enum WillError {
     GracePeriodNotExpired = 5,
     /// `emergency_checkin` was called after the grace period already elapsed.
     GracePeriodExpired = 6,
-    /// Beneficiary percentages did not sum to exactly 100.
+    /// Beneficiary percentages did not sum to exactly 10,000.
     InvalidPercentages = 7,
     /// The guardian has already voted to trigger this will.
     AlreadyVoted = 8,
@@ -50,4 +50,8 @@ pub enum WillError {
     InvalidPeriod = 13,
     /// The same address was supplied more than once in a guardian list.
     DuplicateGuardian = 14,
+    /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
+    /// blocked until the cooldown period passes after the last guardian-list
+    /// change.
+    GuardianCooldownActive = 15,
 }

@@ -21,7 +21,7 @@
 //! its author never considered, so the harness treats it as a hard failure.
 //!
 //! Beyond "does not abort", each runner checks the state invariants that the
-//! contract's documentation claims: shares sum to 100, deadlines are
+//! contract's documentation claims: shares sum to 10,000, deadlines are
 //! representable, custody matches the recorded balance, and the reverse
 //! indexes agree with the beneficiary list.
 //!
@@ -37,12 +37,12 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Vec as SorobanVec,
+    Address, Env, Map, Vec as SorobanVec,
 };
 
 use crate::{
     Beneficiary, Will, WillContract, WillContractClient, WillStatus, MAX_BENEFICIARIES,
-    MAX_GUARDIANS, MAX_PERIOD_DAYS, SECONDS_PER_DAY,
+    MAX_GUARDIANS, MAX_PERIOD_DAYS, MAX_TOKENS, SECONDS_PER_DAY,
 };
 
 /// Number of distinct addresses the fuzzer picks from.
@@ -74,7 +74,7 @@ const MAX_FUZZ_UPDATES: usize = 4;
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 pub struct BeneficiarySpec {
     pub address_slot: u8,
-    pub percentage: u32,
+    pub basis_points: u32,
 }
 
 /// A full `create_will` invocation, including how much the owner is funded
@@ -136,35 +136,35 @@ fn check(condition: bool, input: &impl core::fmt::Debug, message: &str) {
 }
 
 /// Builds the fixed pool of addresses a scenario draws from.
-fn address_pool(env: &Env) -> Vec<Address> {
+fn address_pool(env: &Env) -> SorobanVec<Address> {
     (0..ADDRESS_POOL_SIZE)
         .map(|_| Address::generate(env))
         .collect()
 }
 
 /// Resolves a fuzzer-chosen slot to a pool address.
-fn slot(pool: &[Address], index: u8) -> Address {
-    pool[index as usize % pool.len()].clone()
+fn slot(pool: &SorobanVec<Address>, index: u8) -> Address {
+    pool.get(index as usize % pool.len() as usize).unwrap()
 }
 
 /// Materialises beneficiary specs into the Soroban vector the contract takes.
 fn to_beneficiaries(
     env: &Env,
-    pool: &[Address],
+    pool: &SorobanVec<Address>,
     specs: &[BeneficiarySpec],
 ) -> SorobanVec<Beneficiary> {
     let mut out = SorobanVec::new(env);
     for spec in specs.iter().take(MAX_FUZZ_BENEFICIARIES) {
         out.push_back(Beneficiary {
             address: slot(pool, spec.address_slot),
-            percentage: spec.percentage,
+            basis_points: spec.basis_points,
         });
     }
     out
 }
 
 /// Materialises guardian slots into the Soroban vector the contract takes.
-fn to_guardians(env: &Env, pool: &[Address], slots: &[u8]) -> SorobanVec<Address> {
+fn to_guardians(env: &Env, pool: &SorobanVec<Address>, slots: &[u8]) -> SorobanVec<Address> {
     let mut out = SorobanVec::new(env);
     for &index in slots.iter().take(MAX_FUZZ_GUARDIANS) {
         out.push_back(slot(pool, index));
@@ -173,8 +173,8 @@ fn to_guardians(env: &Env, pool: &[Address], slots: &[u8]) -> SorobanVec<Address
 }
 
 /// Rewrites arbitrary specs into a list the contract is guaranteed to accept:
-/// between 1 and [`MAX_BENEFICIARIES`] entries whose shares are each at least
-/// 1 and sum to exactly 100.
+/// between 1 and [`MAX_BENEFICIARIES`] entries whose basis points sum to
+/// exactly 10,000.
 ///
 /// Address slots are left untouched, so duplicate beneficiaries survive
 /// sanitisation and keep getting exercised.
@@ -187,17 +187,17 @@ fn sanitize_specs(specs: &[BeneficiarySpec]) -> Vec<BeneficiarySpec> {
     if out.is_empty() {
         out.push(BeneficiarySpec {
             address_slot: 0,
-            percentage: 100,
+            basis_points: 10_000,
         });
     }
 
     // One point each, and the remainder to the first entry. With at most
-    // `MAX_BENEFICIARIES` (10) entries the first share is never below 91.
-    let extra = 100 - (out.len() as u32 - 1);
+    // `MAX_BENEFICIARIES` (10) entries the first share is never below 9_991.
+    let extra = 10_000 - (out.len() as u32 - 1);
     for spec in out.iter_mut() {
-        spec.percentage = 1;
+        spec.basis_points = 1;
     }
-    out[0].percentage = extra;
+    out[0].basis_points = extra;
     out
 }
 
@@ -232,7 +232,7 @@ struct Scenario<'a> {
     client: WillContractClient<'a>,
     token: TokenClient<'a>,
     token_address: Address,
-    pool: Vec<Address>,
+    pool: SorobanVec<Address>,
     owner: Address,
 }
 
@@ -244,7 +244,7 @@ impl<'a> Scenario<'a> {
         env.ledger().set_timestamp(BASE_TIMESTAMP);
 
         let pool = address_pool(&env);
-        let owner = pool[0].clone();
+        let owner = pool.get(0).unwrap();
 
         let sac = env.register_stellar_asset_contract_v2(owner.clone());
         let token_address = sac.address();
@@ -283,11 +283,12 @@ pub fn run_create_will(input: &CreateWillInput) -> Outcome {
     let scenario = Scenario::new(input.mint);
     let beneficiaries = to_beneficiaries(&scenario.env, &scenario.pool, &input.beneficiaries);
     let guardians = to_guardians(&scenario.env, &scenario.pool, &input.guardian_slots);
+    let tokens: SorobanVec<(Address, i128)> =
+        soroban_sdk::vec![&scenario.env, (scenario.token_address.clone(), input.amount)];
 
     let result = scenario.client.try_create_will(
         &scenario.owner,
-        &scenario.token_address,
-        &input.amount,
+        &tokens,
         &beneficiaries,
         &input.checkin_period_days,
         &input.grace_period_days,
@@ -326,8 +327,16 @@ fn assert_created_will(
     check(will.id == will_id, input, "stored will id does not match the returned id");
     check(will.owner == scenario.owner, input, "will owner is not the creator");
     check(will.status == WillStatus::Active, input, "a new will is not Active");
-    check(will.balance == input.amount, input, "recorded balance does not match the locked amount");
-    check(will.balance > 0, input, "a will was created with a non-positive balance");
+    check(
+        will.balances.get(scenario.token_address.clone()).unwrap_or(0) == input.amount,
+        input,
+        "recorded balance does not match the locked amount",
+    );
+    check(
+        will.balances.get(scenario.token_address.clone()).unwrap_or(0) > 0,
+        input,
+        "a will was created with a non-positive balance",
+    );
     check(will.trigger_time.is_none(), input, "a new will already has a trigger time");
     check(will.guardian_votes == 0, input, "a new will already has guardian votes");
     check(will.beneficiaries == *beneficiaries, input, "stored beneficiaries differ from the supplied list");
@@ -342,14 +351,9 @@ fn assert_created_will(
     );
     let mut total: u128 = 0;
     for beneficiary in will.beneficiaries.iter() {
-        check(
-            (1..=100).contains(&beneficiary.percentage),
-            input,
-            "a beneficiary share is outside 1..=100",
-        );
-        total += beneficiary.percentage as u128;
+        total += beneficiary.basis_points as u128;
     }
-    check(total == 100, input, "beneficiary shares do not sum to 100");
+    check(total == 10_000, input, "beneficiary basis points do not sum to 10,000");
 
     // Guardians: a stored quorum must be reachable, which it is not if the
     // same address occupies more than one slot.
@@ -392,7 +396,7 @@ fn assert_created_will(
 
     // Custody: the contract must actually hold what it says it holds.
     check(
-        scenario.token.balance(&scenario.client.address) == will.balance,
+        scenario.token.balance(&scenario.client.address) == will.balances.get(scenario.token_address.clone()).unwrap_or(0),
         input,
         "the contract's token balance does not match the will's recorded balance",
     );
@@ -401,7 +405,7 @@ fn assert_created_will(
     check(
         scenario
             .client
-            .get_wills_by_owner(&scenario.owner)
+            .get_wills_by_owner(&scenario.owner, &None, &100)
             .iter()
             .any(|indexed| indexed.id == will_id),
         input,
@@ -411,7 +415,7 @@ fn assert_created_will(
         check(
             scenario
                 .client
-                .get_wills_by_beneficiary(&beneficiary.address)
+                .get_wills_by_beneficiary(&beneficiary.address, &None, &100)
                 .iter()
                 .any(|indexed| indexed.id == will_id),
             input,
@@ -443,7 +447,7 @@ fn assert_full_release(scenario: &Scenario<'_>, input: &CreateWillInput, will_id
 
     let released = scenario.client.get_will(&will_id);
     check(released.status == WillStatus::Released, input, "the will is not Released after release_inheritance");
-    check(released.balance == 0, input, "the released will still records a balance");
+    check(released.balances.len() == 0, input, "the released will still records balances");
     check(
         scenario.token.balance(&scenario.client.address) == 0,
         input,
@@ -482,9 +486,6 @@ pub fn run_update_beneficiaries(input: &UpdateBeneficiariesInput) -> Vec<Outcome
             Ok(Err(_)) => violation(input, "update_beneficiaries returned an undecodable value"),
             Err(Ok(_)) => {
                 // A rejected update must leave the will exactly as it was.
-                // Validation runs before any index mutation, so a partial
-                // write here would be a real bug rather than a rollback
-                // artifact.
                 let after = scenario.client.get_will(&will_id);
                 check(
                     after.beneficiaries == before.beneficiaries,
@@ -492,7 +493,7 @@ pub fn run_update_beneficiaries(input: &UpdateBeneficiariesInput) -> Vec<Outcome
                     "a rejected update still changed the beneficiary list",
                 );
                 check(
-                    after.balance == before.balance && after.status == before.status,
+                    after.balances == before.balances && after.status == before.status,
                     input,
                     "a rejected update changed the will's balance or status",
                 );
@@ -512,7 +513,7 @@ pub fn run_update_beneficiaries(input: &UpdateBeneficiariesInput) -> Vec<Outcome
             check(
                 scenario
                     .client
-                    .get_wills_by_beneficiary(&beneficiary.address)
+                    .get_wills_by_beneficiary(&beneficiary.address, &None, &100)
                     .iter()
                     .any(|indexed| indexed.id == neighbour_id),
                 input,
@@ -565,11 +566,12 @@ fn create_valid_will(
 ) -> u64 {
     let beneficiaries = to_beneficiaries(&scenario.env, &scenario.pool, &create.beneficiaries);
     let guardians = to_guardians(&scenario.env, &scenario.pool, &create.guardian_slots);
+    let tokens: SorobanVec<(Address, i128)> =
+        soroban_sdk::vec![&scenario.env, (scenario.token_address.clone(), create.amount)];
 
     match scenario.client.try_create_will(
         &scenario.owner,
-        &scenario.token_address,
-        &create.amount,
+        &tokens,
         &beneficiaries,
         &create.checkin_period_days,
         &create.grace_period_days,
@@ -596,7 +598,7 @@ fn assert_updated_beneficiaries(
     let will = scenario.client.get_will(&will_id);
 
     check(will.beneficiaries == *replacement, input, "the stored beneficiaries are not the ones supplied");
-    check(will.balance == before.balance, input, "an update changed the will's balance");
+    check(will.balances == before.balances, input, "an update changed the will's balances");
     check(will.status == before.status, input, "an update changed the will's status");
     check(will.owner == before.owner, input, "an update changed the will's owner");
     check(will.guardians == before.guardians, input, "an update changed the will's guardians");
@@ -609,21 +611,16 @@ fn assert_updated_beneficiaries(
     );
     let mut total: u128 = 0;
     for beneficiary in will.beneficiaries.iter() {
-        check(
-            (1..=100).contains(&beneficiary.percentage),
-            input,
-            "a beneficiary share is outside 1..=100 after an update",
-        );
-        total += beneficiary.percentage as u128;
+        total += beneficiary.basis_points as u128;
     }
-    check(total == 100, input, "beneficiary shares do not sum to 100 after an update");
+    check(total == 10_000, input, "beneficiary basis points do not sum to 10,000 after an update");
 
     // Every current beneficiary must be able to find the will...
     for beneficiary in will.beneficiaries.iter() {
         check(
             scenario
                 .client
-                .get_wills_by_beneficiary(&beneficiary.address)
+                .get_wills_by_beneficiary(&beneficiary.address, &None, &100)
                 .iter()
                 .any(|indexed| indexed.id == will_id),
             input,
@@ -644,7 +641,7 @@ fn assert_updated_beneficiaries(
         check(
             !scenario
                 .client
-                .get_wills_by_beneficiary(&old.address)
+                .get_wills_by_beneficiary(&old.address, &None, &100)
                 .iter()
                 .any(|indexed| indexed.id == will_id),
             input,

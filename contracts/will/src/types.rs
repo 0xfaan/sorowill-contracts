@@ -116,6 +116,11 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Unix timestamp (seconds) of the last guardian-list change.
+    /// `guardian_trigger` is only effective after a cooldown period has
+    /// elapsed since this timestamp, preventing a compromised owner from
+    /// swapping guardians right before a malicious action.
+    pub guardian_list_updated_at: u64,
     /// Schema version for this will. Used to track which contract version
     /// wrote this state and enable forward/backward compatible migrations.
     pub schema_version: u32,

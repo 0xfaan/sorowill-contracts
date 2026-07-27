@@ -1852,6 +1852,7 @@ dependencies = [
 name = "will"
 version = "0.1.0"
 dependencies = [
+ "arbitrary",
  "proptest",
  "soroban-sdk",
 ]

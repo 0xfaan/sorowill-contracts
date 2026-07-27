@@ -3,16 +3,13 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    vec, Address, Env,
+    vec, Address, Env, Vec as SorobanVec,
 };
 
+use crate::{Beneficiary, WillContract, WillContractClient, WillError, WillStatus};
 use crate::{Beneficiary, Guardian, WillContract, WillContractClient, WillStatus};
 use crate::{Beneficiary, WillContract, WillContractClient, WillStatus, CONTRACT_VERSION};
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-/// Deploys a Stellar Asset Contract, returning a token client and an admin
-/// client (for minting in tests).
 fn create_token<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAssetClient<'a>) {
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
     (
@@ -21,57 +18,46 @@ fn create_token<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAsse
     )
 }
 
-/// Basic single-token setup: one owner with 1_000_000_000 units of one token.
 fn setup<'a>() -> (
     Env,
     WillContractClient<'a>,
-    Address,           // owner
-    TokenClient<'a>,   // token_a client
-    Address,           // token_a address
+    Address,
+    TokenClient<'a>,
+    Address,
 ) {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
-
     let owner = Address::generate(&env);
-    let (token_client, token_admin_client) = create_token(&env, &owner);
-    token_admin_client.mint(&owner, &1_000_000_000);
-
+    let (token_client, token_admin) = create_token(&env, &owner);
+    token_admin.mint(&owner, &1_000_000_000);
     let contract_id = env.register(WillContract, ());
     let client = WillContractClient::new(&env, &contract_id);
-
-    (env, client, owner, token_client, token_admin_client.address.clone())
+    (env, client, owner, token_client, token_admin.address.clone())
 }
 
-/// Two-token setup: owner holds 1_000_000_000 of token_a and token_b.
 fn setup_two_tokens<'a>() -> (
     Env,
     WillContractClient<'a>,
-    Address,           // owner
-    TokenClient<'a>,   // token_a client
-    Address,           // token_a address
-    TokenClient<'a>,   // token_b client
-    Address,           // token_b address
+    Address,
+    TokenClient<'a>,
+    Address,
+    TokenClient<'a>,
+    Address,
 ) {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
-
     let owner = Address::generate(&env);
-
     let (token_a_client, token_a_admin) = create_token(&env, &owner);
     token_a_admin.mint(&owner, &1_000_000_000);
     let token_a_addr = token_a_admin.address.clone();
-
-    // Use a separate admin for token_b to avoid address collisions.
     let token_b_admin_addr = Address::generate(&env);
     let (token_b_client, token_b_admin) = create_token(&env, &token_b_admin_addr);
     token_b_admin.mint(&owner, &1_000_000_000);
     let token_b_addr = token_b_admin.address.clone();
-
     let contract_id = env.register(WillContract, ());
     let client = WillContractClient::new(&env, &contract_id);
-
     (env, client, owner, token_a_client, token_a_addr, token_b_client, token_b_addr)
 }
 
@@ -105,9 +91,7 @@ fn setup_native<'a>() -> (
 }
 
 fn advance_time(env: &Env, seconds: u64) {
-    env.ledger().with_mut(|l| {
-        l.timestamp += seconds;
-    });
+    env.ledger().with_mut(|l| { l.timestamp += seconds; });
 }
 
 #[test]
@@ -127,7 +111,6 @@ const DAY: u64 = 86_400;
 fn test_create_will_success() {
     let (env, client, owner, token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -146,7 +129,6 @@ fn test_create_will_success() {
         &vec![&env],
         &false,
     );
-
     assert_eq!(will_id, 1);
     let will = client.get_will(&will_id);
     assert_eq!(will.owner, owner);
@@ -251,8 +233,21 @@ fn test_protocol_stats_track_create_cancel_and_release() {
 fn test_checkin_resets_deadline() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address, 0_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env],
+    );
+}
 
-    let will_id = client.create_will(
+#[test]
+#[should_panic]
+fn test_invalid_percentages_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
         &vec![&env, Beneficiary { address: beneficiary, percentage: 100 }],
@@ -270,20 +265,33 @@ fn test_checkin_resets_deadline() {
         &vec![&env],
         &false,
     );
+}
 
+// ── check_in ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_checkin_resets_deadline() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env],
+    );
     advance_time(&env, 10 * DAY);
     client.check_in(&will_id, &owner);
-
     let will = client.get_will(&will_id);
     assert_eq!(will.last_checkin, 1_700_000_000 + 10 * DAY);
     assert_eq!(will.status, WillStatus::Active);
 }
 
+// ── trigger ──────────────────────────────────────────────────────────────────
+
 #[test]
 fn test_trigger_after_missed_checkin() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -302,10 +310,8 @@ fn test_trigger_after_missed_checkin() {
         &vec![&env],
         &false,
     );
-
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
-
     let will = client.get_will(&will_id);
     assert_eq!(will.status, WillStatus::Triggered);
     assert!(will.trigger_time.is_some());
@@ -316,7 +322,6 @@ fn test_trigger_after_missed_checkin() {
 fn test_cannot_trigger_before_deadline() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -335,16 +340,16 @@ fn test_cannot_trigger_before_deadline() {
         &vec![&env],
         &false,
     );
-
     advance_time(&env, 10 * DAY);
     client.trigger_will(&will_id);
 }
+
+// ── emergency_checkin ────────────────────────────────────────────────────────
 
 #[test]
 fn test_emergency_checkin_cancels_trigger() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -363,24 +368,23 @@ fn test_emergency_checkin_cancels_trigger() {
         &vec![&env],
         &false,
     );
-
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
     advance_time(&env, 2 * DAY);
     client.emergency_checkin(&will_id, &owner);
-
     let will = client.get_will(&will_id);
     assert_eq!(will.status, WillStatus::Active);
     assert!(will.trigger_time.is_none());
     assert_eq!(will.last_checkin, 1_700_000_000 + 91 * DAY + 2 * DAY);
 }
 
+// ── release_inheritance ──────────────────────────────────────────────────────
+
 #[test]
 fn test_release_inheritance_splits_correctly() {
     let (env, client, owner, token, token_address) = setup();
-    let beneficiary_a = Address::generate(&env);
-    let beneficiary_b = Address::generate(&env);
-
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -402,19 +406,14 @@ fn test_release_inheritance_splits_correctly() {
         &vec![&env],
         &false,
     );
-
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
     advance_time(&env, 8 * DAY);
     client.release_inheritance(&will_id);
-
-    assert_eq!(token.balance(&beneficiary_a), 600_000);
-    assert_eq!(token.balance(&beneficiary_b), 400_000);
+    assert_eq!(token.balance(&a), 600_000);
+    assert_eq!(token.balance(&b), 400_000);
     assert_eq!(token.balance(&client.address), 0);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Released);
-    assert_eq!(will.balances.len(), 0);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
 }
 
 #[test]
@@ -422,26 +421,12 @@ fn test_release_inheritance_splits_correctly() {
 fn test_cannot_release_during_grace_period() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary, percentage: 100 }],
-        &token_address,
-        &1_000_000,
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary,
-                basis_points: 10_000,
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &false,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env],
     );
-
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
     advance_time(&env, 2 * DAY);
@@ -449,10 +434,11 @@ fn test_cannot_release_during_grace_period() {
 }
 
 #[test]
-fn test_cancel_will_refunds_owner() {
+fn test_fractional_three_way_split() {
     let (env, client, owner, token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
-
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -471,22 +457,112 @@ fn test_cancel_will_refunds_owner() {
         &vec![&env],
         &false,
     );
-
-    client.cancel_will(&will_id, &owner);
-
-    assert_eq!(token.balance(&owner), 1_000_000_000);
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Cancelled);
-    assert_eq!(will.balances.len(), 0);
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+    assert_eq!(token.balance(&a), 500_000);
+    assert_eq!(token.balance(&b), 333_300);
+    assert_eq!(token.balance(&c), 166_700);
+    assert_eq!(token.balance(&client.address), 0);
 }
+
+#[test]
+fn test_release_inheritance_rounding_remainder() {
+    let (env, client, owner, token, token_address) = setup();
+    let b1 = Address::generate(&env);
+    let b2 = Address::generate(&env);
+    let b3 = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_001_i128)],
+        &vec![&env, bp(&b1, 3_333), bp(&b2, 3_333), bp(&b3, 3_334)],
+        &90, &7, &vec![&env],
+    );
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+    let s1 = token.balance(&b1);
+    let s2 = token.balance(&b2);
+    let s3 = token.balance(&b3);
+    assert_eq!(s1 + s2 + s3, 1_000_001);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+#[test]
+fn test_release_multi_token_proportionally() {
+    let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) = setup_two_tokens();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_a_addr.clone(), 1_000_000_i128), (token_b_addr.clone(), 3_000_000_i128)],
+        &vec![&env, bp(&a, 6_000), bp(&b, 4_000)],
+        &90, &7, &vec![&env],
+    );
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+    assert_eq!(token_a.balance(&a), 600_000);
+    assert_eq!(token_a.balance(&b), 400_000);
+    assert_eq!(token_b.balance(&a), 1_800_000);
+    assert_eq!(token_b.balance(&b), 1_200_000);
+}
+
+// ── cancel_will ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_cancel_will_refunds_owner() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary, percentage: 100 }],
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &false,
+    );
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(token.balance(&owner), 1_000_000_000);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_will_refunds_all_tokens() {
+    let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) = setup_two_tokens();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_a_addr.clone(), 1_000_000_i128), (token_b_addr.clone(), 2_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env],
+    );
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(token_a.balance(&owner), 1_000_000_000);
+    assert_eq!(token_b.balance(&owner), 1_000_000_000);
+}
+
+// ── update_beneficiaries ─────────────────────────────────────────────────────
 
 #[test]
 fn test_update_beneficiaries() {
     let (env, client, owner, _token, token_address) = setup();
-    let beneficiary_a = Address::generate(&env);
-    let beneficiary_b = Address::generate(&env);
-    let beneficiary_c = Address::generate(&env);
-
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -505,40 +581,39 @@ fn test_update_beneficiaries() {
         &vec![&env],
         &false,
     );
-
-    client.update_beneficiaries(
-        &will_id,
-        &owner,
-        &vec![
-            &env,
-            Beneficiary { address: beneficiary_b.clone(), percentage: 50 },
-            Beneficiary { address: beneficiary_c.clone(), percentage: 50 },
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                basis_points: 5_000,
-            },
-            Beneficiary {
-                address: beneficiary_c.clone(),
-                basis_points: 5_000,
-            },
-        ],
-    );
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.beneficiaries.len(), 2);
-
-    let wills_for_b = client.get_wills_by_beneficiary(&beneficiary_b);
-    assert_eq!(wills_for_b.len(), 1);
+    client.update_beneficiaries(&will_id, &owner, &vec![&env, bp(&b, 5_000), bp(&c, 5_000)]);
+    assert_eq!(client.get_will(&will_id).beneficiaries.len(), 2);
+    assert_eq!(client.get_wills_by_beneficiary(&b, &None, &100).len(), 1);
 }
 
 #[test]
-fn test_update_guardians() {
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
-    let old_guardian = Address::generate(&env);
-    let new_guardian_1 = Address::generate(&env);
-    let new_guardian_2 = Address::generate(&env);
+fn test_update_beneficiaries_fractional_split() {
+    let (env, client, owner, token, token_address) = setup();
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    let orig = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, bp(&orig, 10_000)],
+        &90, &7, &vec![&env],
+    );
+    client.update_beneficiaries(&will_id, &owner, &vec![&env, bp(&a, 2_500), bp(&b, 7_500)]);
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+    assert_eq!(token.balance(&a), 250_000);
+    assert_eq!(token.balance(&b), 750_000);
+}
 
+#[test]
+#[should_panic]
+fn test_update_beneficiaries_rejects_invalid_bp() {
+    let (env, client, owner, _token, token_address) = setup();
+    let orig = Address::generate(&env);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -557,10 +632,23 @@ fn test_update_guardians() {
         &vec![&env, old_guardian],
         &false,
     );
+    client.update_beneficiaries(&will_id, &owner, &vec![&env, bp(&a, 3_000), bp(&b, 3_000)]);
+}
 
-    client.update_guardians(
-        &will_id,
+// ── update_guardians ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_update_guardians() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let old = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let will_id = client.create_will(
         &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env, old],
         &vec![
             &env,
             Guardian {
@@ -573,8 +661,10 @@ fn test_update_guardians() {
             },
         ],
     );
-
+    client.update_guardians(&will_id, &owner, &vec![&env, g1.clone(), g2.clone()]);
     let will = client.get_will(&will_id);
+    assert_eq!(will.guardians, vec![&env, g1, g2]);
+    assert_eq!(will.guardian_votes, 0);
     assert_eq!(
         will.guardians,
         vec![
@@ -598,7 +688,6 @@ fn test_update_guardians_rejects_non_owner() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
     let non_owner = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -617,16 +706,14 @@ fn test_update_guardians_rejects_non_owner() {
         &vec![&env],
         &false,
     );
-
     client.update_guardians(&will_id, &non_owner, &vec![&env]);
 }
 
 #[test]
 #[should_panic]
-fn test_update_guardians_rejects_too_many_guardians() {
+fn test_update_guardians_rejects_too_many() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -657,15 +744,18 @@ fn test_update_guardians_rejects_too_many_guardians() {
             Address::generate(&env),
         ],
     );
+    client.update_guardians(&will_id, &owner, &vec![
+        &env, Address::generate(&env), Address::generate(&env),
+        Address::generate(&env), Address::generate(&env),
+    ]);
 }
 
 #[test]
-fn test_update_guardians_resets_votes_and_voted_flags() {
+fn test_update_guardians_resets_votes() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-    let guardian_1 = Address::generate(&env);
-    let guardian_2 = Address::generate(&env);
-
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -695,6 +785,11 @@ fn test_update_guardians_resets_votes_and_voted_flags() {
         &vec![&env, guardian_1.clone(), guardian_2.clone()],
         &false,
     );
+    advance_time(&env, 8 * DAY);
+    client.guardian_trigger(&will_id, &g1);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+    client.update_guardians(&will_id, &owner, &vec![&env, g2.clone()]);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 0);
 
     client.guardian_trigger(&will_id, &guardian_1);
     assert_eq!(client.get_will(&will_id).guardian_vote_weight, 1);
@@ -758,19 +853,17 @@ fn test_update_guardians_rejected_while_triggered() {
         &vec![&env],
         &false,
     );
-
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
     client.update_guardians(&will_id, &owner, &vec![&env]);
 }
 
+// ── top_up ───────────────────────────────────────────────────────────────────
+
 #[test]
-#[should_panic]
-fn test_update_guardians_rejected_while_released() {
-    let (env, client, owner, _token, token_address) = setup();
+fn test_top_up_increases_balance() {
+    let (env, client, owner, token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-    let guardian_1 = Address::generate(&env);
-    let guardian_2 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -800,16 +893,14 @@ fn test_update_guardians_rejected_while_released() {
         &vec![&env, guardian_1.clone(), guardian_2.clone()],
         &false,
     );
-
-    client.guardian_trigger(&will_id, &guardian_1);
-    client.guardian_trigger(&will_id, &guardian_2);
-    client.update_guardians(&will_id, &owner, &vec![&env]);
+    client.top_up(&will_id, &owner, &token_address, &500_000);
+    assert_eq!(client.get_will(&will_id).balances.get(token_address.clone()).unwrap(), 1_500_000);
+    assert_eq!(token.balance(&client.address), 1_500_000);
 }
 
 #[test]
-#[should_panic]
-fn test_update_guardians_rejected_while_cancelled() {
-    let (env, client, owner, _token, token_address) = setup();
+fn test_top_up_new_token() {
+    let (env, client, owner, _token_a, token_a_addr, token_b, token_b_addr) = setup_two_tokens();
     let beneficiary = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
@@ -829,41 +920,32 @@ fn test_update_guardians_rejected_while_cancelled() {
         &vec![&env],
         &false,
     );
-
-    client.cancel_will(&will_id, &owner);
-    client.update_guardians(&will_id, &owner, &vec![&env]);
+    client.top_up(&will_id, &owner, &token_b_addr, &500_000);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.balances.len(), 2);
+    assert_eq!(will.balances.get(token_b_addr).unwrap(), 500_000);
 }
 
 #[test]
-fn test_top_up_increases_balance() {
-    let (env, client, owner, token, token_address) = setup();
+fn test_top_up_existing_token_accumulates() {
+    let (env, client, owner, _token_a, token_a_addr, _token_b, _token_b_addr) = setup_two_tokens();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary, percentage: 100 }],
-        &90,
-        &7,
-        &vec![&env],
+        &vec![&env, (token_a_addr.clone(), 1_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env],
     );
-
-    client.top_up(&will_id, &owner, &token_address, &500_000);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.balances.get(token_address.clone()).unwrap(), 1_500_000);
-    // Confirm token moved from owner to contract.
-    assert_eq!(token.balance(&owner), 1_000_000_000 - 1_000_000 - 500_000);
-    assert_eq!(token.balance(&client.address), 1_500_000);
+    client.top_up(&will_id, &owner, &token_a_addr, &250_000);
+    client.top_up(&will_id, &owner, &token_a_addr, &250_000);
+    assert_eq!(client.get_will(&will_id).balances.get(token_a_addr).unwrap(), 1_500_000);
 }
 
 #[test]
-fn test_top_up_emits_event() {
-    use soroban_sdk::{symbol_short, testutils::Events, TryIntoVal};
-
+#[should_panic]
+fn test_top_up_zero_amount_rejected() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -907,14 +989,15 @@ fn test_top_up_emits_event() {
     assert!(found, "topup event not found");
 }
 
+// ── guardian_trigger ─────────────────────────────────────────────────────────
+
 #[test]
 fn test_guardian_trigger_requires_two_votes() {
     let (env, client, owner, token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-    let guardian_1 = Address::generate(&env);
-    let guardian_2 = Address::generate(&env);
-    let guardian_3 = Address::generate(&env);
-
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let g3 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -948,27 +1031,27 @@ fn test_guardian_trigger_requires_two_votes() {
         &false,
         &vec![&env, guardian_1.clone(), guardian_2.clone(), guardian_3.clone()],
     );
+    advance_time(&env, 8 * DAY);
+    client.guardian_trigger(&will_id, &g1);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
 
     client.guardian_trigger(&will_id, &guardian_1);
     let will = client.get_will(&will_id);
     assert_eq!(will.status, WillStatus::Active);
     assert_eq!(will.guardian_vote_weight, 1);
     assert_eq!(token.balance(&beneficiary), 0);
-
-    client.guardian_trigger(&will_id, &guardian_2);
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Released);
+    client.guardian_trigger(&will_id, &g2);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
     assert_eq!(token.balance(&beneficiary), 1_000_000);
 }
 
 #[test]
-#[should_panic]
-fn test_invalid_percentages_rejected() {
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary_a = Address::generate(&env);
-    let beneficiary_b = Address::generate(&env);
-
-    client.create_will(
+fn test_guardian_trigger_multi_token() {
+    let (env, client, owner, _token_a, token_a_addr, _token_b, token_b_addr) = setup_two_tokens();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
         &vec![
@@ -989,13 +1072,18 @@ fn test_invalid_percentages_rejected() {
         &vec![&env],
         &false,
     );
+    advance_time(&env, 8 * DAY);
+    client.guardian_trigger(&will_id, &g1);
+    client.guardian_trigger(&will_id, &g2);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
 }
+
+// ── pagination ───────────────────────────────────────────────────────────────
 
 #[test]
 fn test_get_wills_by_owner() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 500_000_i128)],
@@ -1032,8 +1120,7 @@ fn test_get_wills_by_owner() {
         &vec![&env],
         &false,
     );
-
-    let wills = client.get_wills_by_owner(&owner);
+    let wills = client.get_wills_by_owner(&owner, &None, &100);
     assert_eq!(wills.len(), 2);
 }
 
@@ -1041,7 +1128,6 @@ fn test_get_wills_by_owner() {
 fn test_get_wills_by_beneficiary() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
@@ -1060,8 +1146,7 @@ fn test_get_wills_by_beneficiary() {
         &vec![&env],
         &false,
     );
-
-    let wills = client.get_wills_by_beneficiary(&beneficiary);
+    let wills = client.get_wills_by_beneficiary(&beneficiary, &None, &100);
     assert_eq!(wills.len(), 1);
     assert_eq!(wills.get(0).unwrap().id, will_id);
 }
@@ -1163,9 +1248,8 @@ fn test_native_trigger_and_release() {
 // ── new multi-token tests ─────────────────────────────────────────────────────
 
 #[test]
-fn test_create_will_multi_token_balances_stored() {
-    let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) =
-        setup_two_tokens();
+fn test_pagination_owner() {
+    let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
 
     let will_id = client.create_will(
@@ -1232,9 +1316,8 @@ fn test_fractional_three_way_split() {
 }
 
 #[test]
-fn test_top_up_new_token_adds_to_map() {
-    let (env, client, owner, _token_a, token_a_addr, token_b, token_b_addr) =
-        setup_two_tokens();
+fn test_pagination_beneficiary() {
+    let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
 
     // Create with only token_a.
@@ -1322,12 +1405,11 @@ fn test_fractional_extreme_one_bp_split() {
 }
 
 #[test]
-fn test_top_up_existing_token_accumulates() {
-    let (env, client, owner, token_a, token_a_addr, _token_b, _token_b_addr) =
-        setup_two_tokens();
+fn test_clone_will_copies_configuration() {
+    let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-
-    let will_id = client.create_will(
+    let g1 = Address::generate(&env);
+    let source_id = client.create_will(
         &owner,
         &vec![&env, (token_a_addr.clone(), 1_000_000_i128)],
         &vec![&env, Beneficiary { address: beneficiary.clone(), percentage: 100 }],
@@ -1455,40 +1537,42 @@ fn test_native_top_up() {
                 address: beneficiary,
                 percentage: 100,
     );
-
-    client.top_up(&will_id, &owner, &token_a_addr, &250_000);
-    client.top_up(&will_id, &owner, &token_a_addr, &250_000);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.balances.get(token_a_addr.clone()).unwrap(), 1_500_000);
-    assert_eq!(token_a.balance(&client.address), 1_500_000);
+    let clone = client.get_will(&clone_id);
+    assert_eq!(clone.id, 2);
+    assert_eq!(clone.checkin_period_days, 90);
+    assert_eq!(clone.grace_period_days, 7);
+    assert_eq!(clone.beneficiaries, vec![&env, bp(&beneficiary, 10_000)]);
+    assert_eq!(clone.guardians, vec![&env, g1]);
+    assert_eq!(clone.status, WillStatus::Active);
+    assert_eq!(clone.balances.get(token_address).unwrap(), 500_000);
+    assert_eq!(clone.owner, owner);
 }
 
 #[test]
-fn test_cancel_will_refunds_all_tokens() {
-    let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) =
-        setup_two_tokens();
-    let beneficiary = Address::generate(&env);
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![
-            &env,
-            (token_a_addr.clone(), 1_000_000_i128),
-            (token_b_addr.clone(), 2_000_000_i128),
-        ],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), percentage: 100 }],
-}
-
-/// Validation must reject a basis-point sum of 9_999 (one under the limit).
-#[test]
-#[should_panic]
-fn test_basis_points_under_10000_rejected() {
+fn test_clone_will_independent_from_source() {
     let (env, client, owner, _token, token_address) = setup();
-    let beneficiary_a = Address::generate(&env);
-    let beneficiary_b = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let source_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env],
+    );
+    let clone_id = client.clone_will(
+        &source_id,
+        &owner,
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+    );
+    client.top_up(&clone_id, &owner, &token_address, &100_000);
+    assert_eq!(client.get_will(&source_id).balances.get(token_address.clone()).unwrap(), 1_000_000);
+    assert_eq!(client.get_will(&clone_id).balances.get(token_address).unwrap(), 600_000);
+}
 
-    client.create_will(
+#[test]
+fn test_clone_will_indexed() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let source_id = client.create_will(
         &owner,
         &token_address,
         &1_000_000,
@@ -1540,15 +1624,13 @@ fn test_release_inheritance_distributes_all_tokens_proportionally() {
 
     let will_id = client.create_will(
         &owner,
-        &vec![
-            &env,
-            (token_a_addr.clone(), 1_000_000_i128),
-            (token_b_addr.clone(), 3_000_000_i128),
-        ],
-        &vec![
-            &env,
-            Beneficiary { address: beneficiary_a.clone(), percentage: 60 },
-            Beneficiary { address: beneficiary_b.clone(), percentage: 40 },
+        &vec![&env, (token_address, 500_000_i128)],
+    );
+    let owner_wills = client.get_wills_by_owner(&owner, &None, &100);
+    assert_eq!(owner_wills.len(), 2);
+    let beneficiary_wills = client.get_wills_by_beneficiary(&beneficiary, &None, &100);
+    assert_eq!(beneficiary_wills.len(), 2);
+    assert!(beneficiary_wills.iter().any(|w| w.id == clone_id));
 }
 
 #[test]
@@ -1558,6 +1640,13 @@ fn test_native_guardian_trigger() {
     let guardian_a = Address::generate(&env);
     let guardian_b = Address::generate(&env);
 
+#[test]
+#[should_panic]
+fn test_guardian_cooldown_blocks_trigger() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &owner,
@@ -1604,38 +1693,20 @@ fn test_native_rounding_remainder() {
         &100, // 100 XLM
         &vec![&env],
     );
-
-    advance_time(&env, 91 * DAY);
-    client.trigger_will(&will_id);
     advance_time(&env, 8 * DAY);
-    client.release_inheritance(&will_id);
-
-    // token_a: 60% → 600_000, 40% → 400_000
-    assert_eq!(token_a.balance(&beneficiary_a), 600_000);
-    assert_eq!(token_a.balance(&beneficiary_b), 400_000);
-
-    // token_b: 60% → 1_800_000, 40% → 1_200_000
-    assert_eq!(token_b.balance(&beneficiary_a), 1_800_000);
-    assert_eq!(token_b.balance(&beneficiary_b), 1_200_000);
-
-    // Contract must hold nothing.
-    assert_eq!(token_a.balance(&client.address), 0);
-    assert_eq!(token_b.balance(&client.address), 0);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Released);
-    assert_eq!(will.balances.len(), 0);
+    client.guardian_trigger(&will_id, &g1);
+    client.update_guardians(&will_id, &owner, &vec![&env, g1.clone()]);
+    // Immediately try to trigger — cooldown is active.
+    advance_time(&env, 1 * DAY);
+    client.guardian_trigger(&will_id, &g1);
 }
 
 #[test]
-fn test_release_inheritance_rounding_remainder_goes_to_last_beneficiary() {
-    // Use an amount not evenly divisible: 1_000_001 split 33/33/34.
-    let (env, client, owner, token_a, token_a_addr, _token_b, _token_b_addr) =
-        setup_two_tokens();
-    let b1 = Address::generate(&env);
-    let b2 = Address::generate(&env);
-    let b3 = Address::generate(&env);
-
+fn test_guardian_cooldown_allows_after_period() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
         &vec![&env, (token_a_addr.clone(), 1_000_001_i128)],
@@ -1678,9 +1749,6 @@ fn test_release_inheritance_rounding_remainder_goes_to_last_beneficiary() {
             },
         ],
     );
-
-    advance_time(&env, 91 * DAY);
-    client.trigger_will(&will_id);
     advance_time(&env, 8 * DAY);
     client.release_inheritance(&will_id);
 
@@ -1705,41 +1773,20 @@ fn test_release_inheritance_rounding_remainder_goes_to_last_beneficiary() {
 }
 
 #[test]
-fn test_guardian_trigger_distributes_all_tokens() {
-    let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) =
-        setup_two_tokens();
+fn test_initial_guardian_cooldown() {
+    let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
-    let guardian_1 = Address::generate(&env);
-    let guardian_2 = Address::generate(&env);
-
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
-        &vec![
-            &env,
-            (token_a_addr.clone(), 1_000_000_i128),
-            (token_b_addr.clone(), 500_000_i128),
-        ],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), percentage: 100 }],
-        &90,
-        &7,
-        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, bp(&beneficiary, 10_000)],
+        &90, &7, &vec![&env, g1.clone(), g2],
     );
-
-    client.guardian_trigger(&will_id, &guardian_1);
-    // Only one vote: will still active, no tokens moved yet.
-    assert_eq!(token_a.balance(&beneficiary), 0);
-    assert_eq!(token_b.balance(&beneficiary), 0);
-
-    client.guardian_trigger(&will_id, &guardian_2);
-    // Quorum reached: all tokens distributed.
-    assert_eq!(token_a.balance(&beneficiary), 1_000_000);
-    assert_eq!(token_b.balance(&beneficiary), 500_000);
-    assert_eq!(token_a.balance(&client.address), 0);
-    assert_eq!(token_b.balance(&client.address), 0);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Released);
-    assert_eq!(will.balances.len(), 0);
+    // Will just created — cooldown should be active.
+    let result = client.try_guardian_trigger(&will_id, &g1);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -1760,17 +1807,52 @@ fn test_create_will_zero_amount_rejected() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
 
-    client.create_will(
+#[test]
+fn test_batch_create_wills() {
+    let (env, client, owner, token, token_address) = setup();
+    let b1 = Address::generate(&env);
+    let b2 = Address::generate(&env);
+    let b3 = Address::generate(&env);
+    let ids = client.batch_create_wills(
         &owner,
-        &vec![&env, (token_address.clone(), 0_i128)],
-        &vec![&env, Beneficiary { address: beneficiary, percentage: 100 }],
-    assert_eq!(token.balance(&beneficiary_a), 250_000);
-    assert_eq!(token.balance(&beneficiary_b), 750_000);
-    assert_eq!(token.balance(&client.address), 0);
+        &vec![
+            &env,
+            (
+                vec![&env, (token_address.clone(), 100_000_i128)].into(),
+                vec![&env, bp(&b1, 10_000)].into(),
+                90u64,
+                7u64,
+                vec![&env].into(),
+            ),
+            (
+                vec![&env, (token_address.clone(), 200_000_i128)].into(),
+                vec![&env, bp(&b2, 10_000)].into(),
+                30u64,
+                3u64,
+                vec![&env].into(),
+            ),
+            (
+                vec![&env, (token_address.clone(), 300_000_i128)].into(),
+                vec![&env, bp(&b3, 10_000)].into(),
+                60u64,
+                5u64,
+                vec![&env].into(),
+            ),
+        ],
+    );
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.get(0).unwrap(), 1);
+    assert_eq!(ids.get(1).unwrap(), 2);
+    assert_eq!(ids.get(2).unwrap(), 3);
+    assert_eq!(token.balance(&client.address), 600_000);
+    let w1 = client.get_will(&1);
+    assert_eq!(w1.checkin_period_days, 90);
+    let w2 = client.get_will(&2);
+    assert_eq!(w2.checkin_period_days, 30);
+    let w3 = client.get_will(&3);
+    assert_eq!(w3.checkin_period_days, 60);
 }
 
-/// update_beneficiaries must reject a replacement list whose basis points
-/// do not sum to exactly 10_000.
 #[test]
 #[should_panic]
 fn test_update_beneficiaries_rejects_invalid_basis_points() {
@@ -1834,37 +1916,50 @@ fn test_native_cannot_release_during_grace_period() {
 
 #[test]
 #[should_panic]
-fn test_top_up_zero_amount_rejected() {
+fn test_batch_too_many_rejected() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
+    let specs: SorobanVec<_> = (0..11)
+        .map(|_| {
+            (
+                vec![&env, (token_address.clone(), 100_000_i128)].into(),
+                vec![&env, bp(&beneficiary, 10_000)].into(),
+                90u64,
+                7u64,
+                vec![&env].into(),
+            )
+        })
+        .collect();
+    client.batch_create_wills(&owner, &specs);
+}
 
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary, percentage: 100 }],
-        &90,
-        &7,
-        &vec![&env],
-    );
-
-    client.top_up(&will_id, &owner, &token_address, &0);
-
-    // 3_000 + 3_000 = 6_000 ≠ 10_000 — must panic.
-    client.update_beneficiaries(
-        &will_id,
+#[test]
+fn test_batch_transfers_tokens() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let ids = client.batch_create_wills(
         &owner,
         &vec![
             &env,
-            Beneficiary {
-                address: beneficiary_a,
-                basis_points: 3_000,
-            },
-            Beneficiary {
-                address: beneficiary_b,
-                basis_points: 3_000,
-            },
+            (
+                vec![&env, (token_address.clone(), 400_000_i128)].into(),
+                vec![&env, bp(&beneficiary, 10_000)].into(),
+                90u64,
+                7u64,
+                vec![&env].into(),
+            ),
+            (
+                vec![&env, (token_address.clone(), 600_000_i128)].into(),
+                vec![&env, bp(&beneficiary, 10_000)].into(),
+                90u64,
+                7u64,
+                vec![&env].into(),
+            ),
         ],
     );
+    assert_eq!(ids.len(), 2);
+    assert_eq!(token.balance(&owner), 0);
+    assert_eq!(token.balance(&client.address), 1_000_000);
 }
 
 

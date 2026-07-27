@@ -252,6 +252,35 @@ pub fn reset_guardian_votes(env: &Env, will: &Will) {
     }
 }
 
+// ── Paginated index lookups ──────────────────────────────────────────────
+
+/// Returns a bounded page of will ids from a `Vec<u64>` index.
+///
+/// If `cursor` is `Some(id)`, results start *after* that id (exclusive).
+/// `limit` is capped at [`MAX_PAGE_SIZE`].
+pub fn paginate_ids(env: &Env, ids: &Vec<u64>, cursor: Option<u64>, limit: u32) -> Vec<u64> {
+    let page_size = limit.min(MAX_PAGE_SIZE);
+    let mut result = Vec::new(env);
+    let mut skip = cursor.is_some();
+    let cursor_val = cursor.unwrap_or(0);
+
+    for id in ids.iter() {
+        if skip {
+            if id <= cursor_val {
+                continue;
+            }
+            skip = false;
+        }
+        if result.len() >= page_size {
+            break;
+        }
+        result.push_back(id);
+    }
+    result
+}
+
+/// Maximum number of wills returned per page.
+pub const MAX_PAGE_SIZE: u32 = 50;
 /// Appends a status transition entry to `will_id`'s on-chain audit trail.
 pub fn append_history(env: &Env, will_id: u64, transition: &WillStatusTransition) {
     let key = DataKey::WillHistory(will_id);
