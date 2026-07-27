@@ -1,4 +1,5 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Map, Vec};
 
 /// A single beneficiary entry: an address and the share of the will's balance
 /// it is entitled to receive when the inheritance is released, expressed in
@@ -13,49 +14,21 @@ pub struct Beneficiary {
     pub basis_points: u32,
 }
 
-/// Tier of a guardian, determining voting priority.
+/// A guardian entry: an address paired with a vote weight.
 ///
-/// Primary guardians count immediately toward the release threshold.
-/// Backup guardians may only vote if no primary guardians exist on the
-/// will (i.e. all guardians have been replaced with backups, or the
-/// original list contained only backups).
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GuardianTier {
-    /// Counts immediately toward the guardian-release threshold.
-    Primary,
-    /// Counts only when no primary guardians are present.
-    Backup,
-}
-
-/// A guardian entry pairing an address with its tier.
+/// Guardians with higher weights count for more when reaching quorum.
+/// If all guardians have weight 1, the threshold is a simple majority count.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GuardianEntry {
+pub struct Guardian {
     pub address: Address,
-    pub tier: GuardianTier,
-}
-
-/// Optional vesting schedule attached to a will. When present, the
-/// inheritance is not released in a single lump sum. Instead, funds
-/// unlock linearly from `start_time` over `duration_seconds`. The
-/// `released_amount` tracks how much has already been claimed.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VestingSchedule {
-    /// Unix timestamp (seconds) at which vesting begins.
-    /// For will-triggered vesting this is set to the grace-period expiry.
-    pub start_time: u64,
-    /// Total duration of the vesting window, in seconds.
-    pub duration_seconds: u64,
-    /// Amount of `token` already claimed and transferred out.
-    pub released_amount: i128,
+    pub weight: u32,
 }
 
 /// Lifecycle state of a will.
 ///
 /// ```text
-/// Active --(missed check-in)--> Triggered --(grace period expires)--> Released
+/// Active --(missed check-in)--> Triggered --(grace period expires)--> Released --(close_will)--> Settled
 ///   |                               |
 ///   |--(cancel_will)--> Cancelled   |--(emergency_checkin)--> Active
 ///   |--(partial_release)--> Active  (balance reduced, subset paid)
@@ -81,8 +54,28 @@ pub enum WillStatus {
     Released,
     /// The owner cancelled the will and withdrew the remaining balance.
     Cancelled,
-    /// A vesting schedule is active; funds unlock gradually over time.
-    Vesting,
+    /// A Released will that has been explicitly closed/archived by the owner.
+    Settled,
+}
+
+/// Aggregate protocol statistics that can be queried directly on-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenLockedBalance {
+    /// The token contract address.
+    pub token: Address,
+    /// The total amount of this token that is currently locked in active wills.
+    pub total_locked: i128,
+}
+
+/// Aggregate protocol statistics that can be queried directly on-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    /// The number of wills that are still in a non-terminal state.
+    pub active_will_count: u64,
+    /// Locked balances by token for all currently active wills.
+    pub total_locked_by_token: Vec<TokenLockedBalance>,
 }
 
 /// The full on-chain state of a single will.
@@ -93,8 +86,18 @@ pub struct Will {
     pub id: u64,
     /// The address that created and funds the will.
     pub owner: Address,
+    /// The token contract address (e.g. a USDC Stellar Asset Contract, or the
+    /// native XLM asset address when `is_native` is true) held by the will.
+    /// Map of token contract address → amount currently locked in the will,
+    /// in each token's base units. A will may hold any number of distinct
+    /// SEP-41 compliant tokens simultaneously.
+    pub balances: Map<Address, i128>,
+    /// The beneficiaries and their percentage shares. Always sums to 100.
     /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
     pub token: Address,
+    /// Whether the held asset is native XLM (as opposed to a token contract).
+    /// When `true`, transfers use `env.transfer()` instead of the token client.
+    pub is_native: bool,
     /// The amount of `token` currently locked in the will, in the token's base units.
     pub balance: i128,
     /// The beneficiaries and their basis-point shares. Always sums to 10,000.
@@ -111,16 +114,47 @@ pub struct Will {
     pub trigger_time: Option<u64>,
     /// Current lifecycle state of the will.
     pub status: WillStatus,
-    /// Guardians (up to 3) with tier distinction who may force an early
-    /// release via a 2-of-N vote using `guardian_trigger`.
-    pub guardians: Vec<GuardianEntry>,
+    /// Optional guardians (up to 3) who may force an early release
+    /// via a weight-based quorum using `guardian_trigger`.
+    pub guardians: Vec<Guardian>,
+    /// Accumulated weight of guardian votes cast in the current cycle.
+    /// Release triggers when this reaches `GUARDIAN_THRESHOLD`.
+    pub guardian_vote_weight: u32,
+    /// Optional guardian addresses (up to 3) who may force an early release
+    /// via a 2-of-N vote using `guardian_trigger`.
+    pub guardians: Vec<Address>,
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
-    /// Optional delegate address that may check in on the owner's behalf.
-    pub delegate: Option<Address>,
-    /// Optional vesting schedule. When present, `release_inheritance` does
-    /// not distribute everything at once; funds unlock linearly over the
-    /// configured duration and beneficiaries claim via `claim_vested`.
-    pub vesting: Option<VestingSchedule>,
+    /// Unix timestamp (seconds) of the last guardian-list change.
+    /// `guardian_trigger` is only effective after a cooldown period has
+    /// elapsed since this timestamp, preventing a compromised owner from
+    /// swapping guardians right before a malicious action.
+    pub guardian_list_updated_at: u64,
+    /// Schema version for this will. Used to track which contract version
+    /// wrote this state and enable forward/backward compatible migrations.
+    pub schema_version: u32,
+}
+
+/// A single entry in a will's on-chain audit trail, recording one status
+/// transition. The full history of a will can be reconstructed by reading
+/// all entries in insertion order.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WillStatusTransition {
+    /// The will this transition belongs to.
+    pub will_id: u64,
+    /// The status before the transition.
+    pub from_status: WillStatus,
+    /// The status after the transition.
+    pub to_status: WillStatus,
+    /// Unix timestamp (seconds) when the transition occurred.
+    pub timestamp: u64,
+    /// The address that initiated the transition, or the contract address
+    /// for transitions triggered by anyone (e.g. `trigger_will`,
+    /// `release_inheritance`).
+    pub actor: Address,
+    /// A short label describing what caused the transition
+    /// (e.g. "create", "checkin", "trigger", "release").
+    pub action: Symbol,
 }

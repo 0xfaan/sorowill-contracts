@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["contracts/will"]
+# `fuzz` is a self-contained crate that needs a nightly toolchain and
+# libFuzzer. Keeping it out of the workspace means `cargo test --workspace`
+# and `cargo clippy --all-targets` stay on stable. See docs/FUZZING.md.
+exclude = ["fuzz"]
 
 [workspace.dependencies]
 soroban-sdk = { version = "22.0.0" }
