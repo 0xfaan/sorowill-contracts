@@ -6,6 +6,8 @@
 
 use soroban_sdk::{symbol_short, Address, Env};
 
+use crate::types::GuardianVoteReason;
+
 /// Published when a new will is created.
 pub fn will_created(
     env: &Env,
@@ -80,6 +82,8 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(
@@ -89,9 +93,38 @@ pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balanc
 }
 
 /// Published each time a guardian votes to trigger an early release.
-pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far: u32) {
+/// Includes the reason code for transparency and dispute review.
+pub fn guardian_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    votes_so_far: u32,
+    reason: GuardianVoteReason,
+) {
     env.events().publish(
         (symbol_short!("gvote"), will_id),
-        (guardian.clone(), votes_so_far),
+        (guardian.clone(), votes_so_far, reason),
+    );
+}
+
+/// Published when a grace-tier payout is released to beneficiaries.
+pub fn tier_released(
+    env: &Env,
+    will_id: u64,
+    tier_index: u32,
+    amount: i128,
+    released_basis_points: u32,
+) {
+    env.events().publish(
+        (symbol_short!("tier_rel"), will_id),
+        (tier_index, amount, released_basis_points),
+    );
+}
+
+/// Published when a batch check-in is performed across multiple wills.
+pub fn batch_checkin(env: &Env, owner: &Address, will_ids: &soroban_sdk::Vec<u64>, count: u32) {
+    env.events().publish(
+        (symbol_short!("batchck"),),
+        (owner.clone(), will_ids.clone(), count),
     );
 }

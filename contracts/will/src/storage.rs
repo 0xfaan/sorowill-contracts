@@ -4,13 +4,13 @@
 //! beneficiary indexes are maintained as `Vec<u64>` of will ids so the
 //! contract can answer `get_wills_by_owner` / `get_wills_by_beneficiary`
 //! without an off-chain indexer. Guardian votes are tracked per
-//! `(will_id, guardian)` pair so they can be cleared independently when a
-//! guardian-release cycle resets.
+//! `(will_id, guardian)` pair with a timestamp so they can expire over time,
+//! and cleared independently when a guardian-release cycle resets.
 
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::Will;
+use crate::types::{GuardianVoteReason, Will};
 
 /// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
 /// is approximately 17,280 ledgers.
@@ -21,6 +21,9 @@ const LIFETIME_THRESHOLD: u32 = DAY_IN_LEDGERS * 30;
 
 /// Extend TTL out to this many ledgers when a bump is triggered.
 const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+
+/// Seconds in a day, used to convert day-denominated expiry windows.
+const SECONDS_PER_DAY: u64 = 86_400;
 
 #[contracttype]
 #[derive(Clone)]
@@ -33,8 +36,17 @@ enum DataKey {
     OwnerWills(Address),
     /// List of will ids an address is named as a beneficiary of.
     BeneficiaryWills(Address),
-    /// Whether a guardian has already voted in the current trigger cycle.
+    /// A guardian's vote record: stores `(timestamp, reason)` for time-weighted expiry.
     GuardianVote(u64, Address),
+}
+
+/// The data stored for each guardian vote: the Unix timestamp when the vote
+/// was cast and the reason code the guardian provided.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct GuardianVoteRecord {
+    pub timestamp: u64,
+    pub reason: GuardianVoteReason,
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
@@ -133,19 +145,63 @@ pub fn get_beneficiary_wills(env: &Env, beneficiary: &Address) -> Vec<u64> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Returns whether `guardian` has already voted in the current trigger cycle for `will_id`.
-pub fn has_guardian_voted(env: &Env, will_id: u64, guardian: &Address) -> bool {
+/// Returns the full vote record for `guardian` in the current trigger cycle
+/// for `will_id`, or `None` if they have not voted.
+pub fn get_guardian_vote(env: &Env, will_id: u64, guardian: &Address) -> Option<GuardianVoteRecord> {
     let key = DataKey::GuardianVote(will_id, guardian.clone());
-    env.storage().persistent().get(&key).unwrap_or(false)
+    env.storage().persistent().get(&key)
 }
 
-/// Records that `guardian` has voted in the current trigger cycle for `will_id`.
-pub fn set_guardian_voted(env: &Env, will_id: u64, guardian: &Address) {
+/// Returns whether `guardian` has a non-expired vote in the current trigger
+/// cycle for `will_id`. A vote is considered expired if `now - vote_timestamp`
+/// exceeds `expiry_days * SECONDS_PER_DAY`.
+pub fn has_guardian_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    now: u64,
+    expiry_days: u64,
+) -> bool {
+    if let Some(record) = get_guardian_vote(env, will_id, guardian) {
+        let expiry_secs = expiry_days * SECONDS_PER_DAY;
+        now - record.timestamp <= expiry_secs
+    } else {
+        false
+    }
+}
+
+/// Records that `guardian` has voted in the current trigger cycle for `will_id`,
+/// storing the vote timestamp and reason code.
+pub fn set_guardian_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    timestamp: u64,
+    reason: GuardianVoteReason,
+) {
     let key = DataKey::GuardianVote(will_id, guardian.clone());
-    env.storage().persistent().set(&key, &true);
+    let record = GuardianVoteRecord { timestamp, reason };
+    env.storage().persistent().set(&key, &record);
     env.storage()
         .persistent()
         .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Counts how many distinct guardians have non-expired votes for `will_id`.
+pub fn count_valid_guardian_votes(
+    env: &Env,
+    will_id: u64,
+    guardians: &Vec<Address>,
+    now: u64,
+    expiry_days: u64,
+) -> u32 {
+    let mut count = 0u32;
+    for guardian in guardians.iter() {
+        if has_guardian_voted(env, will_id, &guardian, now, expiry_days) {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Clears all guardian votes for `will_id`, starting a fresh voting cycle.

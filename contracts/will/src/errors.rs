@@ -33,4 +33,14 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// A guardian vote has expired and no longer counts toward quorum.
+    VoteExpired = 13,
+    /// Grace-tier configuration is invalid (unsorted, overlapping, or basis points don't sum to 10,000).
+    InvalidGraceTiers = 14,
+    /// The requested grace tier index is out of range or not yet claimable.
+    InvalidTierIndex = 15,
+    /// The requested grace tier has already been released.
+    TierAlreadyReleased = 16,
+    /// The grace-tier payout would exceed the will's balance (should not happen with valid tiers).
+    InsufficientBalance = 17,
 }
