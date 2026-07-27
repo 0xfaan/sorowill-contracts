@@ -51,6 +51,18 @@ cargo test
 cargo clippy --all-targets
 ```
 
+## Resource costs
+
+Every entry point is profiled for the resources Soroban bills — CPU
+instructions, ledger entries read and written, and storage rent:
+
+```bash
+cargo test -p will --lib profile -- --nocapture
+```
+
+See [docs/RESOURCE_COSTS.md](./docs/RESOURCE_COSTS.md) for the current numbers,
+what drives each entry point's cost, and the storage layout trade-offs behind
+them.
 ## Testing and fuzzing
 
 `cargo test` runs the hand-written suite in `contracts/will/src/test.rs`
