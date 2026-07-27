@@ -61,6 +61,9 @@ impl WillContract {
     ///   token address must be unique, each amount must be positive, and the
     ///   list must contain between 1 and `MAX_TOKENS` entries.
     /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose percentages sum to exactly 100.
+    /// - `token`: the token contract address (e.g. a USDC Stellar Asset Contract).
+    /// - `amount`: the amount of `token` to lock, in the token's base units. Must be positive.
+    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points sum to exactly 10,000.
     /// - `checkin_period_days`: how many days the owner may go without checking in.
     /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
     /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
@@ -73,6 +76,10 @@ impl WillContract {
     /// - [`WillError::TooManyBeneficiaries`] if the beneficiary/guardian/token lists are
     ///   empty or exceed their respective caps.
     /// - [`WillError::InvalidPercentages`] if beneficiary percentages do not sum to 100.
+    /// - [`WillError::ZeroAmount`] if `amount` is not positive.
+    /// - [`WillError::TooManyBeneficiaries`] if the beneficiary list is empty or too large,
+    ///   or if too many guardians are supplied.
+    /// - [`WillError::InvalidPercentages`] if beneficiary basis points do not sum to 10,000.
     #[allow(clippy::too_many_arguments)]
     pub fn create_will(
         env: Env,
@@ -291,13 +298,13 @@ impl WillContract {
     }
 
     /// Replaces the beneficiary list for `will_id`. Only possible while the
-    /// will is `Active`. The new percentages must sum to exactly 100.
+    /// will is `Active`. The new basis points must sum to exactly 10,000.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if the new list is empty or too large.
-    /// - [`WillError::InvalidPercentages`] if the new percentages do not sum to 100.
+    /// - [`WillError::InvalidPercentages`] if the new basis points do not sum to 10,000.
     pub fn update_beneficiaries(
         env: Env,
         will_id: u64,
@@ -474,13 +481,13 @@ fn assert_status(env: &Env, will: &Will, expected: WillStatus, err: WillError) {
     }
 }
 
-/// Asserts beneficiary percentages sum to exactly 100.
+/// Asserts beneficiary basis points sum to exactly 10,000.
 fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     let mut total: u32 = 0;
     for beneficiary in beneficiaries.iter() {
-        total += beneficiary.percentage;
+        total += beneficiary.basis_points;
     }
-    if total != 100 {
+    if total != 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
     }
 }
@@ -491,6 +498,10 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
 /// `Released`, and publishes the `InheritanceReleased` event. Any rounding
 /// remainder from integer division is paid to the final beneficiary so the
 /// full balance of every token is always distributed with no dust left behind.
+/// Splits `will.balance` across `will.beneficiaries` proportionally to their
+/// basis-point shares, transfers the shares out of the contract, marks the
+/// will `Released`, and publishes the `InheritanceReleased` event. Any
+/// rounding remainder from integer division is paid to the final beneficiary.
 fn distribute(env: &Env, will: &mut Will) {
     let contract_address = env.current_contract_address();
     let count = will.beneficiaries.len();
@@ -514,6 +525,17 @@ fn distribute(env: &Env, will: &mut Will) {
             if share > 0 {
                 token_client.transfer(&contract_address, &beneficiary.address, &share);
             }
+    let mut remaining = total;
+    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
+        let share = if index as u32 == count - 1 {
+            remaining
+        } else {
+            let portion = total * (beneficiary.basis_points as i128) / 10_000;
+            remaining -= portion;
+            portion
+        };
+        if share > 0 {
+            token_client.transfer(&contract_address, &beneficiary.address, &share);
         }
     }
 

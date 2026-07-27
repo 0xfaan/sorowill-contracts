@@ -1,14 +1,16 @@
 use soroban_sdk::{contracttype, Address, Map, Vec};
 
-/// A single beneficiary entry: an address and the percentage of the will's
-/// balance it is entitled to receive when the inheritance is released.
+/// A single beneficiary entry: an address and the share of the will's balance
+/// it is entitled to receive when the inheritance is released, expressed in
+/// basis points (1 bp = 0.01 %).
 ///
-/// Percentages across all beneficiaries of a will must sum to exactly 100.
+/// `basis_points` across all beneficiaries of a will must sum to exactly
+/// 10,000 (i.e. 100 %).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Beneficiary {
     pub address: Address,
-    pub percentage: u32,
+    pub basis_points: u32,
 }
 
 /// Lifecycle state of a will.
@@ -45,6 +47,11 @@ pub struct Will {
     /// SEP-41 compliant tokens simultaneously.
     pub balances: Map<Address, i128>,
     /// The beneficiaries and their percentage shares. Always sums to 100.
+    /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
+    pub token: Address,
+    /// The amount of `token` currently locked in the will, in the token's base units.
+    pub balance: i128,
+    /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
     /// How many days the owner may go without checking in before the will
     /// can be triggered.
