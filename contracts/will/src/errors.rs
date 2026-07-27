@@ -21,7 +21,7 @@ pub enum WillError {
     GracePeriodNotExpired = 5,
     /// `emergency_checkin` was called after the grace period already elapsed.
     GracePeriodExpired = 6,
-    /// Beneficiary percentages did not sum to exactly 100.
+    /// Beneficiary percentages did not sum to exactly 10,000.
     InvalidPercentages = 7,
     /// The guardian has already voted to trigger this will.
     AlreadyVoted = 8,
@@ -33,14 +33,25 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
-    /// A guardian vote has expired and no longer counts toward quorum.
-    VoteExpired = 13,
-    /// Grace-tier configuration is invalid (unsorted, overlapping, or basis points don't sum to 10,000).
-    InvalidGraceTiers = 14,
-    /// The requested grace tier index is out of range or not yet claimable.
-    InvalidTierIndex = 15,
-    /// The requested grace tier has already been released.
-    TierAlreadyReleased = 16,
-    /// The grace-tier payout would exceed the will's balance (should not happen with valid tiers).
-    InsufficientBalance = 17,
+    /// The requested action requires the will to be `Released` or `Cancelled`.
+    WillNotSettled = 13,
+    /// The requested action requires the will to be `Released`.
+    WillNotReleased = 13,
+    /// Cannot merge: both wills must be owned by the same address.
+    NotSameOwner = 13,
+    /// Cannot merge: one or both wills are not in Active status.
+    WillNotBothActive = 14,
+    /// Cannot merge: same will id provided for both wills.
+    SameWillId = 15,
+    /// Cannot merge: merging would result in too many beneficiaries or guardians.
+    MergeWouldExceedLimits = 16,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 13,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 14,
+    /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
+    /// blocked until the cooldown period passes after the last guardian-list
+    /// change.
+    GuardianCooldownActive = 15,
 }
