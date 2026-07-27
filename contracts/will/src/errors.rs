@@ -33,4 +33,9 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 13,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 14,
 }
