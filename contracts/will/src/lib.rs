@@ -479,35 +479,29 @@ impl WillContract {
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
+        // Snapshot the balances before mutating state (checks-effects-interactions).
         let refund = will.balance;
-        transfer_funds(
-            &env,
-            will.is_native,
-            &will.token,
-            &env.current_contract_address(),
-            &owner,
-            &refund,
-        );
         let contract_address = env.current_contract_address();
         let token_count = will.balances.len();
+        // Capture balances for transfer after state is committed.
+        let balances_snapshot = will.balances.clone();
 
-        // Refund every token balance back to the owner.
-        for (token_addr, balance) in will.balances.iter() {
-            if balance > 0 {
-                token::Client::new(&env, &token_addr).transfer(
-                    &contract_address,
-                    &owner,
-                    &balance,
-                );
-            }
-        }
-
+        // --- EFFECTS: mutate state and persist before any external calls ---
         storage::decrement_active_will_count(&env);
         storage::adjust_locked_value(&env, &will.token, -refund);
 
         will.balance = 0;
         will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
+
+        // Prune stale index entries (#70): remove the will from the owner
+        // index and from every beneficiary's reverse index so that
+        // get_wills_by_owner / get_wills_by_beneficiary no longer return it.
+        storage::remove_owner_index(&env, &owner, will_id);
+        for beneficiary in will.beneficiaries.iter() {
+            storage::remove_beneficiary_index(&env, &beneficiary.address, will_id);
+        }
+
         storage::save_will(&env, &will);
 
         record_transition(
@@ -519,7 +513,17 @@ impl WillContract {
             symbol_short!("cancel"),
         );
 
-        events::will_cancelled(&env, will_id, &owner, refund);
+        // --- INTERACTIONS: external token transfers happen after state is settled ---
+        for (token_addr, balance) in balances_snapshot.iter() {
+            if balance > 0 {
+                token::Client::new(&env, &token_addr).transfer(
+                    &contract_address,
+                    &owner,
+                    &balance,
+                );
+            }
+        }
+
         events::will_cancelled(&env, will_id, &owner, token_count);
     }
 
@@ -644,22 +648,20 @@ impl WillContract {
             panic_with_error!(&env, WillError::ZeroAmount);
         }
 
-        transfer_funds(
-            &env,
-            will.is_native,
-            &will.token,
+        // Snapshot values needed after state mutation (checks-effects-interactions).
+        let prev = will.balances.get(token.clone()).unwrap_or(0);
+        let new_balance = prev + amount;
+
+        // --- EFFECTS: update state and persist before the external transfer ---
+        will.balances.set(token.clone(), new_balance);
+        storage::save_will(&env, &will);
+
+        // --- INTERACTIONS: external token transfer after state is committed ---
         token::Client::new(&env, &token).transfer(
             &owner,
             &env.current_contract_address(),
             &amount,
         );
-
-        will.balance += amount;
-        storage::adjust_locked_value(&env, &will.token, amount);
-        let prev = will.balances.get(token.clone()).unwrap_or(0);
-        let new_balance = prev + amount;
-        will.balances.set(token.clone(), new_balance);
-        storage::save_will(&env, &will);
 
         events::top_up(&env, will_id, &owner, &token, amount, new_balance);
     }
@@ -1308,27 +1310,33 @@ fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: 
 /// Splits `will.balance` across `will.beneficiaries` proportionally to their
 /// percentages, transfers the shares out of the contract, marks the will
 /// `Released`, and publishes the `InheritanceReleased` event with a full
-/// per-beneficiary breakdown. Any rounding remainder from integer division
-/// is paid to the final beneficiary.
 /// For each token in `will.balances`, splits the balance across
 /// `will.beneficiaries` proportionally to their basis-point shares, transfers
 /// the shares out of the contract, clears the balances map, marks the will
 /// `Released`, and publishes the `InheritanceReleased` event. Any rounding
 /// remainder from integer division is paid to the final beneficiary so the
 /// full balance of every token is always distributed with no dust left behind.
+///
+/// Follows checks-effects-interactions ordering: all per-beneficiary share
+/// amounts are computed from the pre-mutation balances, then all state is
+/// committed (status, balances, indexes), and only then are the external
+/// token transfers executed.
 fn distribute(env: &Env, will: &mut Will) {
     let contract_address = env.current_contract_address();
     let count = will.beneficiaries.len();
-    let guardian_triggered = will.status == WillStatus::Active;
     let token_count = will.balances.len();
+
+    // --- COMPUTE: calculate every share from the current (pre-mutation) balances ---
+    // Build a Vec of (token_addr, Vec<(beneficiary_addr, share)>) so we can
+    // commit all state before any external call fires.
+    let mut transfer_plan: Vec<(Address, Vec<(Address, i128)>)> = Vec::new(env);
 
     for (token_addr, total) in will.balances.iter() {
         if total == 0 {
             continue;
         }
-        let token_client = token::Client::new(env, &token_addr);
+        let mut shares: Vec<(Address, i128)> = Vec::new(env);
         let mut remaining = total;
-
         for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
             let share = if index as u32 == count - 1 {
                 remaining
@@ -1337,41 +1345,37 @@ fn distribute(env: &Env, will: &mut Will) {
                 remaining -= portion;
                 portion
             };
-            if share > 0 {
-                token_client.transfer(&contract_address, &beneficiary.address, &share);
-            }
-    let mut remaining = total;
-    let mut breakdown: Vec<(Address, u32, i128)> = Vec::new(env);
-    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
-        let share = if index as u32 == count - 1 {
-            remaining
-        } else {
-            let portion = total * (beneficiary.basis_points as i128) / 10_000;
-            remaining -= portion;
-            portion
-        };
-        if share > 0 {
-            transfer_funds(
-                env,
-                will.is_native,
-                &will.token,
-                &contract_address,
-                &beneficiary.address,
-                &share,
-            );
+            shares.push_back((beneficiary.address.clone(), share));
         }
-        breakdown.push_back((beneficiary.address.clone(), beneficiary.percentage, share));
+        transfer_plan.push_back((token_addr, shares));
     }
 
+    // --- EFFECTS: mutate and persist all state before any external call ---
     storage::decrement_active_will_count(env);
-    storage::adjust_locked_value(env, &will.token, -total);
 
     will.balance = 0;
     will.balances = Map::new(env);
     will.status = WillStatus::Released;
+
+    // Prune stale index entries (#71): remove the released will from the
+    // owner index and from every beneficiary's reverse index.
+    storage::remove_owner_index(env, &will.owner, will.id);
+    for beneficiary in will.beneficiaries.iter() {
+        storage::remove_beneficiary_index(env, &beneficiary.address, will.id);
+    }
+
     storage::save_will(env, will);
 
-    events::inheritance_released(env, will.id, total, &breakdown, guardian_triggered);
+    // --- INTERACTIONS: external token transfers execute after state is settled ---
+    for (token_addr, shares) in transfer_plan.iter() {
+        let token_client = token::Client::new(env, &token_addr);
+        for (beneficiary_addr, share) in shares.iter() {
+            if share > 0 {
+                token_client.transfer(&contract_address, &beneficiary_addr, &share);
+            }
+        }
+    }
+
     events::inheritance_released(env, will.id, token_count, count);
 }
 
