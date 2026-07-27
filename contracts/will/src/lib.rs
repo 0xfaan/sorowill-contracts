@@ -13,10 +13,14 @@
 //! [`WillContract::release_inheritance`] to split the locked balance among
 //! the beneficiaries proportionally to their configured percentages.
 //!
-//! Optionally, up to three guardians may be named on a will; any two of them
-//! calling [`WillContract::guardian_trigger`] force an immediate release,
-//! bypassing the check-in/grace-period flow entirely (e.g. if the owner is
-//! known to be incapacitated).
+//! Optionally, up to three guardians (with tier distinction: primary or
+//! backup) may be named on a will; any two of them calling
+//! [`WillContract::guardian_trigger`] force an immediate release.
+//!
+//! The owner may designate a delegate to check in on their behalf, perform
+//! partial early releases to a subset of beneficiaries while the will
+//! remains active, and optionally configure a vesting schedule so that the
+//! inheritance unlocks gradually instead of in a single lump sum.
 
 mod errors;
 mod events;
@@ -29,7 +33,7 @@ mod test;
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus};
+pub use types::{Beneficiary, GuardianEntry, GuardianTier, VestingSchedule, Will, WillStatus};
 
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
@@ -58,7 +62,10 @@ impl WillContract {
     /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points sum to exactly 10,000.
     /// - `checkin_period_days`: how many days the owner may go without checking in.
     /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
-    /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
+    /// - `guardians`: 0 to `MAX_GUARDIANS` guardian entries (address + tier).
+    /// - `delegate`: optional delegate address that may check in on the owner's behalf.
+    /// - `vesting_duration_days`: if set, the inheritance unlocks linearly over this many days
+    ///   after the grace period expires, instead of being released as a lump sum.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -77,7 +84,9 @@ impl WillContract {
         beneficiaries: Vec<Beneficiary>,
         checkin_period_days: u64,
         grace_period_days: u64,
-        guardians: Vec<Address>,
+        guardians: Vec<GuardianEntry>,
+        delegate: Option<Address>,
+        vesting_duration_days: Option<u64>,
     ) -> u64 {
         owner.require_auth();
 
@@ -102,6 +111,12 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
+        let vesting = vesting_duration_days.map(|days| VestingSchedule {
+            start_time: 0, // set when grace period expires
+            duration_seconds: days * SECONDS_PER_DAY,
+            released_amount: 0,
+        });
+
         let will = Will {
             id: will_id,
             owner: owner.clone(),
@@ -115,6 +130,8 @@ impl WillContract {
             status: WillStatus::Active,
             guardians,
             guardian_votes: 0,
+            delegate,
+            vesting,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -132,18 +149,36 @@ impl WillContract {
     }
 
     /// Resets the check-in countdown for `will_id`. Must be called by the
-    /// will's owner, and the will must be `Active`.
-    pub fn check_in(env: Env, will_id: u64, owner: Address) {
-        owner.require_auth();
-        let mut will = load_owned(&env, will_id, &owner);
+    /// will's owner or the designated delegate, and the will must be `Active`.
+    pub fn check_in(env: Env, will_id: u64, caller: Address) {
+        caller.require_auth();
+        let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+        assert_owner_or_delegate(&env, &will, &caller);
 
         let now = env.ledger().timestamp();
         will.last_checkin = now;
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
-        events::check_in(&env, will_id, &owner, next_deadline);
+        events::check_in(&env, will_id, &caller, next_deadline);
+    }
+
+    /// Sets or replaces the delegate address for `will_id`. Only callable
+    /// by the owner while the will is `Active`. Pass `None` to clear.
+    pub fn set_delegate(env: Env, will_id: u64, owner: Address, delegate: Option<Address>) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        will.delegate = delegate.clone();
+        storage::save_will(&env, &will);
+
+        if let Some(ref addr) = delegate {
+            events::delegate_set(&env, will_id, &owner, addr);
+        } else {
+            events::delegate_cleared(&env, will_id, &owner);
+        }
     }
 
     /// Starts the grace period for `will_id` once the check-in deadline has
@@ -210,9 +245,15 @@ impl WillContract {
 
     /// Distributes the will's balance to all beneficiaries proportionally to
     /// their configured percentages. Callable by anyone once the grace
-    /// period has fully elapsed. Any rounding remainder from integer
-    /// division is paid to the final beneficiary so the full balance is
-    /// always distributed with no dust left behind.
+    /// period has fully elapsed.
+    ///
+    /// If a vesting schedule is configured, instead of releasing everything
+    /// at once, this transitions the will to `Vesting` status and records
+    /// the start time. Beneficiaries then call `claim_vested` to unlock
+    /// their share gradually.
+    ///
+    /// If no vesting schedule is configured, behaves exactly as before:
+    /// full lump-sum release.
     ///
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
@@ -228,11 +269,172 @@ impl WillContract {
 
         let trigger_time = will.trigger_time.unwrap_or(0);
         let grace_deadline = trigger_time + will.grace_period_days * SECONDS_PER_DAY;
-        if env.ledger().timestamp() < grace_deadline {
+        let now = env.ledger().timestamp();
+        if now < grace_deadline {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
-        distribute(&env, &mut will);
+        if will.vesting.is_some() {
+            // Start vesting: record the start time and transition to Vesting.
+            let vesting = will.vesting.as_mut().unwrap();
+            vesting.start_time = now;
+            will.status = WillStatus::Vesting;
+            will.trigger_time = None;
+            storage::save_will(&env, &will);
+
+            events::vesting_started(&env, will_id, now, vesting.duration_seconds);
+        } else {
+            distribute(&env, &mut will);
+        }
+    }
+
+    /// Claims the vested portion of the will's balance for the caller.
+    /// The caller must be one of the will's beneficiaries. The releasable
+    /// amount is calculated linearly based on elapsed time since vesting
+    /// started, proportionally to the beneficiary's basis-point share.
+    ///
+    /// Callable by anyone once the will is in `Vesting` status. If the
+    /// full amount has vested, this completes the release and marks the
+    /// will `Released`.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotActive`] if the will is not in `Vesting` status.
+    /// - [`WillError::NothingVested`] if no time has elapsed since vesting started.
+    /// - [`WillError::FullyReleased`] if the balance is already zero.
+    /// - [`WillError::InvalidReleaseBeneficiaries`] if the caller is not a beneficiary.
+    pub fn claim_vested(env: Env, will_id: u64, claimer: Address) {
+        claimer.require_auth();
+        let mut will = load_will(&env, will_id);
+        assert_status(&env, &will, WillStatus::Vesting, WillError::WillNotActive);
+
+        if will.balance <= 0 {
+            panic_with_error!(&env, WillError::FullyReleased);
+        }
+
+        let vesting = will.vesting.as_ref().unwrap();
+        let now = env.ledger().timestamp();
+        if now <= vesting.start_time {
+            panic_with_error!(&env, WillError::NothingVested);
+        }
+
+        let elapsed = now - vesting.start_time;
+        let total_amount = will.balance + vesting.released_amount;
+        let duration = vesting.duration_seconds;
+
+        let claimer_share = find_beneficiary_share(&env, &will, &claimer);
+
+        let vested_total = if elapsed >= duration {
+            total_amount
+        } else {
+            total_amount * (elapsed as i128) / (duration as i128)
+        };
+
+        let claimable = vested_total - vesting.released_amount;
+        let claimer_amount = claimable * (claimer_share as i128) / 10_000;
+
+        if claimer_amount <= 0 {
+            panic_with_error!(&env, WillError::NothingVested);
+        }
+
+        let token_client = token::Client::new(&env, &will.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &claimer,
+            &claimer_amount,
+        );
+
+        will.balance -= claimer_amount;
+        let vesting = will.vesting.as_mut().unwrap();
+        vesting.released_amount += claimer_amount;
+
+        if will.balance <= 0 {
+            will.balance = 0;
+            will.status = WillStatus::Released;
+        }
+        storage::save_will(&env, &will);
+
+        events::vested_claim(&env, will_id, &claimer, claimer_amount, will.balance);
+    }
+
+    /// Performs a partial early release: the owner proactively distributes a
+    /// fraction of the locked balance to a specified subset of beneficiaries
+    /// while the will remains `Active`. Each selected beneficiary receives
+    /// their proportionate share of `amount` based on their basis points
+    /// relative to the sum of the selected beneficiaries' basis points.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to partially release from.
+    /// - `owner`: the will's owner; must authorize this call.
+    /// - `amount`: the total amount to release. Must be positive and ≤ will.balance.
+    /// - `beneficiary_addresses`: the addresses of the subset of beneficiaries
+    ///   who should receive this early release. Must be a non-empty subset of
+    ///   the will's beneficiary list.
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::ZeroPartialRelease`] if `amount` is not positive.
+    /// - [`WillError::InsufficientBalance`] if `amount` exceeds the will's balance.
+    /// - [`WillError::InvalidReleaseBeneficiaries`] if no valid beneficiary addresses are supplied.
+    pub fn partial_release(
+        env: Env,
+        will_id: u64,
+        owner: Address,
+        amount: i128,
+        beneficiary_addresses: Vec<Address>,
+    ) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if amount <= 0 {
+            panic_with_error!(&env, WillError::ZeroPartialRelease);
+        }
+        if amount > will.balance {
+            panic_with_error!(&env, WillError::InsufficientBalance);
+        }
+        if beneficiary_addresses.is_empty() {
+            panic_with_error!(&env, WillError::InvalidReleaseBeneficiaries);
+        }
+
+        // Validate that all supplied addresses are actual beneficiaries.
+        let mut selected_bp_sum: u32 = 0;
+        for addr in beneficiary_addresses.iter() {
+            let bp = find_beneficiary_share(&env, &will, &addr);
+            selected_bp_sum += bp;
+        }
+        if selected_bp_sum == 0 {
+            panic_with_error!(&env, WillError::InvalidReleaseBeneficiaries);
+        }
+
+        let token_client = token::Client::new(&env, &will.token);
+        let contract_address = env.current_contract_address();
+        let mut distributed: i128 = 0;
+        let selected_count = beneficiary_addresses.len();
+
+        for (index, addr) in beneficiary_addresses.iter().enumerate() {
+            let bp = find_beneficiary_share(&env, &will, &addr);
+            let share = if index as u32 == selected_count - 1 {
+                amount - distributed
+            } else {
+                amount * (bp as i128) / (selected_bp_sum as i128)
+            };
+            distributed += share;
+            if share > 0 {
+                token_client.transfer(&contract_address, &addr, &share);
+            }
+        }
+
+        will.balance -= amount;
+        storage::save_will(&env, &will);
+
+        events::partial_release(
+            &env,
+            will_id,
+            amount,
+            selected_count,
+            will.balance,
+        );
     }
 
     /// Cancels the will and refunds the full locked balance to the owner.
@@ -307,7 +509,12 @@ impl WillContract {
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
     ///   guardians are supplied.
-    pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Address>) {
+    pub fn update_guardians(
+        env: Env,
+        will_id: u64,
+        owner: Address,
+        guardians: Vec<GuardianEntry>,
+    ) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
@@ -385,23 +592,31 @@ impl WillContract {
     }
 
     /// Casts a guardian vote to force an early release of `will_id`, for use
-    /// when the owner is known to be incapacitated. Once
-    /// [`GUARDIAN_THRESHOLD`] distinct guardians have voted, the balance is
-    /// immediately distributed to beneficiaries, bypassing the check-in and
-    /// grace-period flow entirely.
+    /// when the owner is known to be incapacitated.
+    ///
+    /// **Tier logic**: Primary guardians count immediately toward the
+    /// [`GUARDIAN_THRESHOLD`]. Backup guardians may only vote if no primary
+    /// guardians exist in the will's guardian list. Once the threshold is
+    /// reached, the balance is distributed (or vesting begins, if configured).
     ///
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::NotGuardian`] if `guardian` is not one of the will's guardians.
     /// - [`WillError::AlreadyVoted`] if `guardian` already voted in this cycle.
+    /// - [`WillError::BackupGuardianUnavailable`] if a backup guardian tries to vote
+    ///   while primary guardians are present.
     pub fn guardian_trigger(env: Env, will_id: u64, guardian: Address) {
         guardian.require_auth();
         let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        if !will.guardians.contains(&guardian) {
-            panic_with_error!(&env, WillError::NotGuardian);
+        let entry = find_guardian_entry(&env, &will, &guardian);
+
+        // Enforce tier rules: backup guardians cannot vote while primaries exist.
+        if entry.tier == GuardianTier::Backup && has_primary_guardians(&will) {
+            panic_with_error!(&env, WillError::BackupGuardianUnavailable);
         }
+
         if storage::has_guardian_voted(&env, will_id, &guardian) {
             panic_with_error!(&env, WillError::AlreadyVoted);
         }
@@ -413,10 +628,25 @@ impl WillContract {
         events::guardian_voted(&env, will_id, &guardian, will.guardian_votes);
 
         if will.guardian_votes >= GUARDIAN_THRESHOLD {
-            distribute(&env, &mut will);
+            if will.vesting.is_some() {
+                // Start vesting instead of lump-sum release.
+                let now = env.ledger().timestamp();
+                let vesting = will.vesting.as_mut().unwrap();
+                vesting.start_time = now;
+                will.status = WillStatus::Vesting;
+                will.trigger_time = None;
+                will.guardian_votes = 0;
+                storage::reset_guardian_votes(&env, will_id, &will.guardians);
+                storage::save_will(&env, &will);
+                events::vesting_started(&env, will_id, now, vesting.duration_seconds);
+            } else {
+                distribute(&env, &mut will);
+            }
         }
     }
 }
+
+// ── Private helpers ─────────────────────────────────────────────────────────
 
 /// Loads a will by id, panicking with [`WillError::WillNotFound`] if it does not exist.
 fn load_will(env: &Env, will_id: u64) -> Will {
@@ -442,6 +672,18 @@ fn assert_status(env: &Env, will: &Will, expected: WillStatus, err: WillError) {
     }
 }
 
+/// Asserts that `caller` is either the will's owner or its designated delegate.
+fn assert_owner_or_delegate(env: &Env, will: &Will, caller: &Address) {
+    if &will.owner == caller {
+        return;
+    }
+    match &will.delegate {
+        Some(delegate) if delegate == caller => return,
+        _ => {}
+    }
+    panic_with_error!(env, WillError::NotOwnerOrDelegate);
+}
+
 /// Asserts beneficiary basis points sum to exactly 10,000.
 fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     let mut total: u32 = 0;
@@ -451,6 +693,38 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     if total != 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
     }
+}
+
+/// Returns the basis-point share of `address` in the will's beneficiary list.
+/// Panics if `address` is not a beneficiary.
+fn find_beneficiary_share(env: &Env, will: &Will, address: &Address) -> u32 {
+    for b in will.beneficiaries.iter() {
+        if b.address == *address {
+            return b.basis_points;
+        }
+    }
+    panic_with_error!(env, WillError::InvalidReleaseBeneficiaries);
+}
+
+/// Finds the `GuardianEntry` for `address` in the will's guardian list.
+/// Panics if not found.
+fn find_guardian_entry(env: &Env, will: &Will, address: &Address) -> GuardianEntry {
+    for entry in will.guardians.iter() {
+        if entry.address == *address {
+            return entry;
+        }
+    }
+    panic_with_error!(env, WillError::NotGuardian);
+}
+
+/// Returns `true` if the will has at least one primary guardian.
+fn has_primary_guardians(will: &Will) -> bool {
+    for entry in will.guardians.iter() {
+        if entry.tier == GuardianTier::Primary {
+            return true;
+        }
+    }
+    false
 }
 
 /// Splits `will.balance` across `will.beneficiaries` proportionally to their

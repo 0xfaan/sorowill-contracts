@@ -80,6 +80,8 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(
@@ -93,5 +95,61 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far:
     env.events().publish(
         (symbol_short!("gvote"), will_id),
         (guardian.clone(), votes_so_far),
+    );
+}
+
+/// Published when the owner sets or changes the delegate address.
+pub fn delegate_set(env: &Env, will_id: u64, owner: &Address, delegate: &Address) {
+    env.events().publish(
+        (symbol_short!("delegate"), will_id),
+        (owner.clone(), delegate.clone()),
+    );
+}
+
+/// Published when the delegate clears the delegate address.
+pub fn delegate_cleared(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("dlgt clr"), will_id), owner.clone());
+}
+
+/// Published when the owner performs a partial early release to a subset of
+/// beneficiaries while the will remains active.
+pub fn partial_release(
+    env: &Env,
+    will_id: u64,
+    total_released: i128,
+    beneficiaries_count: u32,
+    remaining_balance: i128,
+) {
+    env.events().publish(
+        (symbol_short!("prelease"), will_id),
+        (total_released, beneficiaries_count, remaining_balance),
+    );
+}
+
+/// Published when the grace period expires and a vesting schedule begins.
+pub fn vesting_started(
+    env: &Env,
+    will_id: u64,
+    start_time: u64,
+    duration_seconds: u64,
+) {
+    env.events().publish(
+        (symbol_short!("veststart"), will_id),
+        (start_time, duration_seconds),
+    );
+}
+
+/// Published when a beneficiary claims their vested portion.
+pub fn vested_claim(
+    env: &Env,
+    will_id: u64,
+    claimer: &Address,
+    amount: i128,
+    remaining_balance: i128,
+) {
+    env.events().publish(
+        (symbol_short!("vclaim"), will_id),
+        (claimer.clone(), amount, remaining_balance),
     );
 }

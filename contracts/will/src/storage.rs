@@ -10,7 +10,7 @@
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::Will;
+use crate::types::{GuardianEntry, Will};
 
 /// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
 /// is approximately 17,280 ledgers.
@@ -152,9 +152,9 @@ pub fn set_guardian_voted(env: &Env, will_id: u64, guardian: &Address) {
 ///
 /// Called whenever a will returns to `Active` (e.g. via `emergency_checkin`)
 /// so that guardians can vote again in a subsequent incapacitation event.
-pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Address>) {
-    for guardian in guardians.iter() {
-        let key = DataKey::GuardianVote(will_id, guardian.clone());
+pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<GuardianEntry>) {
+    for entry in guardians.iter() {
+        let key = DataKey::GuardianVote(will_id, entry.address.clone());
         env.storage().persistent().remove(&key);
     }
 }

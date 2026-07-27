@@ -33,4 +33,22 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// The caller is not the owner nor the designated delegate.
+    NotOwnerOrDelegate = 13,
+    /// No delegate has been set on this will.
+    DelegateNotSet = 14,
+    /// The partial release amount must be positive.
+    ZeroPartialRelease = 15,
+    /// None of the supplied beneficiary addresses are named in this will.
+    InvalidReleaseBeneficiaries = 16,
+    /// The requested partial release exceeds the remaining balance.
+    InsufficientBalance = 17,
+    /// A backup guardian cannot vote while a primary guardian is available.
+    BackupGuardianUnavailable = 18,
+    /// Nothing has vested yet; the vesting duration has not elapsed.
+    NothingVested = 19,
+    /// The will has no vesting schedule configured.
+    VestingNotConfigured = 20,
+    /// The will is already fully released; no more claims are possible.
+    FullyReleased = 21,
 }
