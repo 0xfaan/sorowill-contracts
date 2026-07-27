@@ -96,4 +96,7 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Schema version for this will. Used to track which contract version
+    /// wrote this state and enable forward/backward compatible migrations.
+    pub schema_version: u32,
 }

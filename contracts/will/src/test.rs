@@ -1776,3 +1776,264 @@ fn test_top_up_zero_amount_rejected() {
         ],
     );
 }
+
+
+#[test]
+fn test_migrate_will_updates_schema_version() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // New wills should be created at CURRENT_SCHEMA_VERSION
+    let will = client.get_will(&will_id);
+    assert_eq!(will.schema_version, 1);
+
+    // Migrating a will that's already at current version should be a no-op
+    client.migrate_will(&will_id, &owner);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.schema_version, 1);
+}
+
+#[test]
+#[should_panic]
+fn test_migrate_will_rejects_non_owner() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let non_owner = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.migrate_will(&will_id, &non_owner);
+}
+
+#[test]
+#[should_panic]
+fn test_migrate_nonexistent_will() {
+    let (env, client, owner, _token, _token_address) = setup();
+
+    // Try to migrate a will that doesn't exist
+    client.migrate_will(&999, &owner);
+}
+
+#[test]
+fn test_migrate_will_preserves_state() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                percentage: 60,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                percentage: 40,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian.clone()],
+    );
+
+    advance_time(&env, 10 * DAY);
+    client.check_in(&will_id, &owner);
+
+    // Migrate the will
+    client.migrate_will(&will_id, &owner);
+
+    // Verify all state is preserved
+    let will = client.get_will(&will_id);
+    assert_eq!(will.owner, owner);
+    assert_eq!(will.balance, 1_000_000);
+    assert_eq!(will.status, WillStatus::Active);
+    assert_eq!(will.checkin_period_days, 90);
+    assert_eq!(will.grace_period_days, 7);
+    assert_eq!(will.last_checkin, 1_700_000_000 + 10 * DAY);
+    assert_eq!(will.beneficiaries.len(), 2);
+    assert_eq!(will.beneficiaries.get(0).unwrap().percentage, 60);
+    assert_eq!(will.guardians.len(), 1);
+    assert_eq!(will.guardians.get(0).unwrap(), &guardian);
+    assert_eq!(will.schema_version, 1);
+}
+
+#[test]
+fn test_migrate_will_emits_event() {
+    use soroban_sdk::{testutils::Events, symbol_short, TryIntoVal};
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // Clear events from create_will
+    let _ = env.events().all();
+
+    // Migrate and check for event
+    client.migrate_will(&will_id, &owner);
+    let events = env.events().all();
+
+    let mut found = false;
+    for event in events.iter() {
+        if !event.1.is_empty() {
+            if let Ok(topic0) = event.1.get(0).unwrap().try_into_val(&env) {
+                let topic0_sym: soroban_sdk::Symbol = topic0;
+                if topic0_sym == symbol_short!("migrated") {
+                    found = true;
+                    assert_eq!(event.0, client.address.clone());
+                    let topic1: u64 = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+                    assert_eq!(topic1, will_id);
+                    let data: (Address, u32, u32) = event.2.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, owner);
+                    assert_eq!(data.1, 1); // old version
+                    assert_eq!(data.2, 1); // new version
+                }
+            }
+        }
+    }
+    assert!(found, "migrated event not found");
+}
+
+#[test]
+fn test_migrate_will_while_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    // Migration should succeed even while triggered
+    client.migrate_will(&will_id, &owner);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.schema_version, 1);
+    assert_eq!(will.status, WillStatus::Triggered);
+}
+
+#[test]
+fn test_migrate_will_after_emergency_checkin() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &token_address,
+        &1_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    advance_time(&env, 2 * DAY);
+    client.emergency_checkin(&will_id, &owner);
+
+    // Migrate after emergency checkin
+    client.migrate_will(&will_id, &owner);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.schema_version, 1);
+    assert_eq!(will.status, WillStatus::Active);
+}
+
+#[test]
+fn test_new_wills_created_at_current_version() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // Create multiple wills
+    for i in 0..3 {
+        let will_id = client.create_will(
+            &owner,
+            &token_address,
+            &(1_000_000 * (i + 1) as i128),
+            &vec![
+                &env,
+                Beneficiary {
+                    address: beneficiary.clone(),
+                    percentage: 100,
+                },
+            ],
+            &90,
+            &7,
+            &vec![&env],
+        );
+
+        let will = client.get_will(&will_id);
+        assert_eq!(will.schema_version, 1, "Will {} not at current version", will_id);
+    }
+}
