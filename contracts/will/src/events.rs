@@ -80,6 +80,8 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(
@@ -94,4 +96,10 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far:
         (symbol_short!("gvote"), will_id),
         (guardian.clone(), votes_so_far),
     );
+}
+
+/// Published when a Released or Cancelled will is archived.
+pub fn will_archived(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("archived"), will_id), owner.clone());
 }

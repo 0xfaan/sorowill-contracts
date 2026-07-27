@@ -26,10 +26,10 @@ mod types;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus};
+pub use types::{Beneficiary, Will, WillStatus, WillStatusTransition};
 
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
@@ -119,6 +119,15 @@ impl WillContract {
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
 
+        record_transition(
+            &env,
+            will_id,
+            WillStatus::Active,
+            WillStatus::Active,
+            &owner,
+            symbol_short!("create"),
+        );
+
         events::will_created(
             &env,
             will_id,
@@ -169,6 +178,15 @@ impl WillContract {
         let grace_period_ends = now + will.grace_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
+        record_transition(
+            &env,
+            will_id,
+            WillStatus::Active,
+            WillStatus::Triggered,
+            &env.current_contract_address(),
+            symbol_short!("trigger"),
+        );
+
         events::will_triggered(&env, will_id, grace_period_ends);
     }
 
@@ -205,6 +223,15 @@ impl WillContract {
         let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
+        record_transition(
+            &env,
+            will_id,
+            WillStatus::Triggered,
+            WillStatus::Active,
+            &owner,
+            symbol_short!("emerg"),
+        );
+
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
     }
 
@@ -232,6 +259,15 @@ impl WillContract {
             panic_with_error!(&env, WillError::GracePeriodNotExpired);
         }
 
+        record_transition(
+            &env,
+            will_id,
+            WillStatus::Triggered,
+            WillStatus::Released,
+            &env.current_contract_address(),
+            symbol_short!("release"),
+        );
+
         distribute(&env, &mut will);
     }
 
@@ -258,6 +294,15 @@ impl WillContract {
         will.balance = 0;
         will.status = WillStatus::Cancelled;
         storage::save_will(&env, &will);
+
+        record_transition(
+            &env,
+            will_id,
+            WillStatus::Active,
+            WillStatus::Cancelled,
+            &owner,
+            symbol_short!("cancel"),
+        );
 
         events::will_cancelled(&env, will_id, &owner, refund);
     }
@@ -413,8 +458,45 @@ impl WillContract {
         events::guardian_voted(&env, will_id, &guardian, will.guardian_votes);
 
         if will.guardian_votes >= GUARDIAN_THRESHOLD {
+            record_transition(
+                &env,
+                will_id,
+                WillStatus::Active,
+                WillStatus::Released,
+                &guardian,
+                symbol_short!("gtrigr"),
+            );
             distribute(&env, &mut will);
         }
+    }
+
+    /// Returns the full audit trail for `will_id`, recording every status
+    /// transition since creation.
+    pub fn get_will_history(env: Env, will_id: u64) -> Vec<WillStatusTransition> {
+        storage::get_history(&env, will_id)
+    }
+
+    /// Archives a Released or Cancelled will, removing it from active
+    /// storage and indexes so it no longer appears in owner/beneficiary
+    /// queries. The archived will data will eventually be garbage-collected
+    /// by Soroban's state archival system.
+    ///
+    /// Callable by anyone: once a will is settled it can be archived to
+    /// reduce ongoing storage costs.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    /// - [`WillError::WillNotSettled`] if the will is not `Released` or `Cancelled`.
+    pub fn archive_will(env: Env, will_id: u64) {
+        let will = load_will(&env, will_id);
+        if will.status != WillStatus::Released && will.status != WillStatus::Cancelled {
+            panic_with_error!(&env, WillError::WillNotSettled);
+        }
+
+        let archived_will = will.clone();
+        storage::archive_will(&env, &will);
+
+        events::will_archived(&env, will_id, &archived_will.owner);
     }
 }
 
@@ -482,4 +564,24 @@ fn distribute(env: &Env, will: &mut Will) {
     storage::save_will(env, will);
 
     events::inheritance_released(env, will.id, total, count);
+}
+
+/// Records a status transition in `will_id`'s on-chain audit trail.
+fn record_transition(
+    env: &Env,
+    will_id: u64,
+    from_status: WillStatus,
+    to_status: WillStatus,
+    actor: &Address,
+    action: soroban_sdk::Symbol,
+) {
+    let transition = WillStatusTransition {
+        will_id,
+        from_status,
+        to_status,
+        timestamp: env.ledger().timestamp(),
+        actor: actor.clone(),
+        action,
+    };
+    storage::append_history(env, will_id, &transition);
 }

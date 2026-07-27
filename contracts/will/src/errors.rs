@@ -33,4 +33,6 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// The requested action requires the will to be `Released` or `Cancelled`.
+    WillNotSettled = 13,
 }

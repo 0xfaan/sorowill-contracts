@@ -10,7 +10,7 @@
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::Will;
+use crate::types::{Will, WillStatusTransition};
 
 /// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
 /// is approximately 17,280 ledgers.
@@ -35,6 +35,10 @@ enum DataKey {
     BeneficiaryWills(Address),
     /// Whether a guardian has already voted in the current trigger cycle.
     GuardianVote(u64, Address),
+    /// Audit trail of status transitions for a will.
+    WillHistory(u64),
+    /// Archived state of a will that has been Released or Cancelled.
+    ArchivedWill(u64),
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
@@ -156,5 +160,59 @@ pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Address>) {
     for guardian in guardians.iter() {
         let key = DataKey::GuardianVote(will_id, guardian.clone());
         env.storage().persistent().remove(&key);
+    }
+}
+
+/// Appends a status transition entry to `will_id`'s on-chain audit trail.
+pub fn append_history(env: &Env, will_id: u64, transition: &WillStatusTransition) {
+    let key = DataKey::WillHistory(will_id);
+    let mut history: Vec<WillStatusTransition> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    history.push_back(transition.clone());
+    env.storage().persistent().set(&key, &history);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Returns the full audit trail for `will_id`.
+pub fn get_history(env: &Env, will_id: u64) -> Vec<WillStatusTransition> {
+    let key = DataKey::WillHistory(will_id);
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Archives a will by moving it to the archived storage and removing it from
+/// active storage and indexes. The archived will's TTL is not extended, so it
+/// will eventually be garbage-collected by Soroban's state archival system.
+pub fn archive_will(env: &Env, will: &Will) {
+    // Move will to archived storage (no TTL extension)
+    let archival_key = DataKey::ArchivedWill(will.id);
+    env.storage().persistent().set(&archival_key, will);
+
+    // Remove from active storage
+    let active_key = DataKey::Will(will.id);
+    env.storage().persistent().remove(&active_key);
+
+    // Remove from owner index
+    let owner_key = DataKey::OwnerWills(will.owner.clone());
+    if let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&owner_key) {
+        let mut updated: Vec<u64> = Vec::new(env);
+        for id in ids.iter() {
+            if id != will.id {
+                updated.push_back(id);
+            }
+        }
+        env.storage().persistent().set(&owner_key, &updated);
+    }
+
+    // Remove from beneficiary indexes
+    for beneficiary in will.beneficiaries.iter() {
+        remove_beneficiary_index(env, &beneficiary.address, will.id);
     }
 }

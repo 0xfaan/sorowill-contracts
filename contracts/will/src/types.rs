@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Vec};
+use soroban_sdk::{contracttype, Address, Symbol, Vec};
 
 /// A single beneficiary entry: an address and the percentage of the will's
 /// balance it is entitled to receive when the inheritance is released.
@@ -64,4 +64,27 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+}
+
+/// A single entry in a will's on-chain audit trail, recording one status
+/// transition. The full history of a will can be reconstructed by reading
+/// all entries in insertion order.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct WillStatusTransition {
+    /// The will this transition belongs to.
+    pub will_id: u64,
+    /// The status before the transition.
+    pub from_status: WillStatus,
+    /// The status after the transition.
+    pub to_status: WillStatus,
+    /// Unix timestamp (seconds) when the transition occurred.
+    pub timestamp: u64,
+    /// The address that initiated the transition, or the contract address
+    /// for transitions triggered by anyone (e.g. `trigger_will`,
+    /// `release_inheritance`).
+    pub actor: Address,
+    /// A short label describing what caused the transition
+    /// (e.g. "create", "checkin", "trigger", "release").
+    pub action: Symbol,
 }
