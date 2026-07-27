@@ -7,7 +7,7 @@ The repository `SoroWill/sorowill-contracts` manages smart contracts that custod
 
 ### Documentation
 
-#### [NEW] [SECURITY.md](file:///C:/Users/%D0%9C%D0%B0%D0%BA%D1%81%D0%B8%D0%BC/Documents/antigravity/valiant-hopper/sorowill-contracts/SECURITY.md)
+#### [NEW] [SECURITY.md](../SECURITY.md)
 Create `SECURITY.md` containing:
 - **Supported Versions**: Clearly state supported branches/deployments (e.g. latest `main` branch and active Testnet contract deployments).
 - **Reporting a Vulnerability**: Document private vulnerability reporting via GitHub Private Vulnerability Reporting or security email (`security@sorowill.org`).
@@ -15,7 +15,7 @@ Create `SECURITY.md` containing:
 - **In-Scope & Out-of-Scope**: Explicit list of smart contracts (`contracts/will`), deployed WASM artifacts, and out-of-scope third-party infrastructure.
 - **Responsible Disclosure & Rewards**: Guidelines for safe disclosure without disrupting user assets, and inclusion in the Stellar Wave / Drips security reward pool.
 
-#### [MODIFY] [README.md](file:///C:/Users/%D0%9C%D0%B0%D0%BA%D1%81%D0%B8%D0%BC/Documents/antigravity/valiant-hopper/sorowill-contracts/README.md)
+#### [MODIFY] [README.md](../README.md)
 - Add a Security badge in the top badges section pointing to `./SECURITY.md`.
 - Add a `## Security Policy` section referencing `SECURITY.md` for private disclosures.
 
