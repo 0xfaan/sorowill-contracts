@@ -34,6 +34,26 @@ pub enum WillStatus {
     Cancelled,
 }
 
+/// Aggregate protocol statistics that can be queried directly on-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenLockedBalance {
+    /// The token contract address.
+    pub token: Address,
+    /// The total amount of this token that is currently locked in active wills.
+    pub total_locked: i128,
+}
+
+/// Aggregate protocol statistics that can be queried directly on-chain.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolStats {
+    /// The number of wills that are still in a non-terminal state.
+    pub active_will_count: u64,
+    /// Locked balances by token for all currently active wills.
+    pub total_locked_by_token: Vec<TokenLockedBalance>,
+}
+
 /// The full on-chain state of a single will.
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -42,10 +62,20 @@ pub struct Will {
     pub id: u64,
     /// The address that created and funds the will.
     pub owner: Address,
-    /// Map of token contract address -> amount currently locked in the will,
+    /// The token contract address (e.g. a USDC Stellar Asset Contract, or the
+    /// native XLM asset address when `is_native` is true) held by the will.
+    /// Map of token contract address → amount currently locked in the will,
     /// in each token's base units. A will may hold any number of distinct
     /// SEP-41 compliant tokens simultaneously.
     pub balances: Map<Address, i128>,
+    /// The beneficiaries and their percentage shares. Always sums to 100.
+    /// The token contract (e.g. a USDC Stellar Asset Contract) held by the will.
+    pub token: Address,
+    /// Whether the held asset is native XLM (as opposed to a token contract).
+    /// When `true`, transfers use `env.transfer()` instead of the token client.
+    pub is_native: bool,
+    /// The amount of `token` currently locked in the will, in the token's base units.
+    pub balance: i128,
     /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
     /// How many days the owner may go without checking in before the will

@@ -47,7 +47,7 @@ mod test;
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Map, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus};
+pub use types::{Beneficiary, ProtocolStats, Will, WillStatus};
 
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
@@ -105,6 +105,13 @@ impl WillContract {
     ///   to prove they are alive; 1 to `MAX_PERIOD_DAYS`.
     /// - `guardians`: 0 to `MAX_GUARDIANS` distinct addresses that may jointly
     ///   force an early release.
+    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points sum to exactly 10,000.
+    /// - `checkin_period_days`: how many days the owner may go without checking in.
+    /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
+    /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
+    /// - `is_native`: whether the asset is native XLM. When `true`, transfers use
+    ///   `env.transfer()` instead of the token client; the `token` address is still
+    ///   stored but the native path is used for all balance movements.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -126,6 +133,7 @@ impl WillContract {
         checkin_period_days: u64,
         grace_period_days: u64,
         guardians: Vec<Address>,
+        is_native: bool,
     ) -> u64 {
         owner.require_auth();
 
@@ -161,6 +169,8 @@ impl WillContract {
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
 
+        transfer_funds(&env, is_native, &token, &owner, &env.current_contract_address(), &amount);
+
         let beneficiaries_count = beneficiaries.len();
         let token_count = balances.len();
         for beneficiary in beneficiaries.iter() {
@@ -170,6 +180,10 @@ impl WillContract {
         let will = Will {
             id: will_id,
             owner: owner.clone(),
+            token: token.clone(),
+            token,
+            is_native,
+            balance: amount,
             balances,
             beneficiaries,
             checkin_period_days,
@@ -183,6 +197,8 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::increment_active_will_count(&env);
+        storage::adjust_locked_value(&env, &token, amount);
 
         events::will_created(
             &env,
@@ -316,6 +332,15 @@ impl WillContract {
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
+        let refund = will.balance;
+        transfer_funds(
+            &env,
+            will.is_native,
+            &will.token,
+            &env.current_contract_address(),
+            &owner,
+            &refund,
+        );
         let contract_address = env.current_contract_address();
         let token_count = will.balances.len();
 
@@ -330,6 +355,10 @@ impl WillContract {
             }
         }
 
+        storage::decrement_active_will_count(&env);
+        storage::adjust_locked_value(&env, &will.token, -refund);
+
+        will.balance = 0;
         will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
         storage::save_will(&env, &will);
@@ -432,12 +461,18 @@ impl WillContract {
             panic_with_error!(&env, WillError::ZeroAmount);
         }
 
+        transfer_funds(
+            &env,
+            will.is_native,
+            &will.token,
         token::Client::new(&env, &token).transfer(
             &owner,
             &env.current_contract_address(),
             &amount,
         );
 
+        will.balance += amount;
+        storage::adjust_locked_value(&env, &will.token, amount);
         let prev = will.balances.get(token.clone()).unwrap_or(0);
         let new_balance = prev + amount;
         will.balances.set(token.clone(), new_balance);
@@ -454,18 +489,13 @@ impl WillContract {
         load_will(&env, will_id)
     }
 
-    /// Returns a page of wills owned by `owner`.
-    ///
-    /// Supports bounded pagination to avoid hitting Soroban resource limits
-    /// for addresses with many wills.
-    ///
-    /// # Parameters
-    /// - `owner`: the address whose wills to query.
-    /// - `cursor`: optional will id to paginate after (exclusive). Pass `None`
-    ///   or `0` for the first page.
-    /// - `limit`: maximum number of wills to return. Capped at
-    ///   [`storage::MAX_PAGE_SIZE`].
-    pub fn get_wills_by_owner(env: Env, owner: Address, cursor: Option<u64>, limit: u32) -> Vec<Will> {
+    /// Returns aggregate protocol statistics for all wills currently tracked on-chain.
+    pub fn get_protocol_stats(env: Env) -> ProtocolStats {
+        storage::get_protocol_stats(&env)
+    }
+
+    /// Returns the full state of every will owned by `owner`.
+    pub fn get_wills_by_owner(env: Env, owner: Address) -> Vec<Will> {
         let ids = storage::get_owner_wills(&env, &owner);
         let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
@@ -818,6 +848,35 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     }
 }
 
+/// Transfers funds using either native XLM or token contract depending on
+/// `is_native`. When native, uses `env.transfer()`; otherwise uses the
+/// standard token client.
+fn transfer_funds(
+    env: &Env,
+    is_native: bool,
+    token_address: &Address,
+    from: &Address,
+    to: &Address,
+    amount: &i128,
+) {
+    if is_native {
+        env.transfer(from, to, amount);
+    } else {
+        token::Client::new(env, token_address).transfer(from, to, amount);
+    }
+}
+
+/// Returns the balance of `address` for the asset identified by the will.
+/// For native XLM this uses `env.balance()`, for token contracts it uses the
+/// token client's `balance` method.
+fn balance_of(env: &Env, is_native: bool, token_address: &Address, address: &Address) -> i128 {
+    if is_native {
+        env.balance(address)
+    } else {
+        token::Client::new(env, token_address).balance(address)
+    }
+}
+
 /// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
 /// repeated address.
 ///
@@ -881,9 +940,31 @@ fn distribute(env: &Env, will: &mut Will) {
             if share > 0 {
                 token_client.transfer(&contract_address, &beneficiary.address, &share);
             }
+    let mut remaining = total;
+    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
+        let share = if index as u32 == count - 1 {
+            remaining
+        } else {
+            let portion = total * (beneficiary.basis_points as i128) / 10_000;
+            remaining -= portion;
+            portion
+        };
+        if share > 0 {
+            transfer_funds(
+                env,
+                will.is_native,
+                &will.token,
+                &contract_address,
+                &beneficiary.address,
+                &share,
+            );
         }
     }
 
+    storage::decrement_active_will_count(env);
+    storage::adjust_locked_value(env, &will.token, -total);
+
+    will.balance = 0;
     will.balances = Map::new(env);
     will.status = WillStatus::Released;
     storage::save_will(env, will);
