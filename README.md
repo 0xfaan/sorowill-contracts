@@ -63,6 +63,24 @@ cargo test -p will --lib profile -- --nocapture
 See [docs/RESOURCE_COSTS.md](./docs/RESOURCE_COSTS.md) for the current numbers,
 what drives each entry point's cost, and the storage layout trade-offs behind
 them.
+## Testing and fuzzing
+
+`cargo test` runs the hand-written suite in `contracts/will/src/test.rs`
+alongside a property-based fuzzing suite that drives `create_will` and
+`update_beneficiaries` with malformed and edge-case input, checking that the
+contract never aborts and that an accepted will always satisfies its
+documented invariants.
+
+For deeper, coverage-guided fuzzing there are `cargo-fuzz` targets under
+[`fuzz/`](./fuzz):
+
+```bash
+cargo install cargo-fuzz
+cd fuzz && cargo +nightly fuzz run create_will
+```
+
+See [docs/FUZZING.md](./docs/FUZZING.md) for the invariants that are checked,
+how to reproduce and minimise a crash, and how to add a target.
 
 ## Contract Functions
 
