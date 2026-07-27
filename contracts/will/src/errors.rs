@@ -35,4 +35,17 @@ pub enum WillError {
     TooManyBeneficiaries = 12,
     /// The requested action requires the will to be `Released`.
     WillNotReleased = 13,
+    /// Cannot merge: both wills must be owned by the same address.
+    NotSameOwner = 13,
+    /// Cannot merge: one or both wills are not in Active status.
+    WillNotBothActive = 14,
+    /// Cannot merge: same will id provided for both wills.
+    SameWillId = 15,
+    /// Cannot merge: merging would result in too many beneficiaries or guardians.
+    MergeWouldExceedLimits = 16,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 13,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 14,
 }

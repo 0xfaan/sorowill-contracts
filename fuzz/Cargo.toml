@@ -1,0 +1,46 @@
+[package]
+name = "will-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT"
+description = "cargo-fuzz targets for the SoroWill will contract"
+
+# Its own workspace: this crate needs a nightly toolchain and libFuzzer, and
+# must not be dragged into the stable `cargo test --workspace` build.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+will = { path = "../contracts/will", features = ["fuzzing"] }
+
+# cargo-fuzz builds in release by default. Overflow checks and debug
+# assertions must stay on: an arithmetic overflow that silently wraps is a bug
+# the fuzzer would never see. Unwinding must stay on too, so the Soroban test
+# host can catch a contract panic and report it as an abort rather than
+# killing the process before the harness can label it.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+panic = "unwind"
+incremental = false
+codegen-units = 1
+
+[[bin]]
+name = "create_will"
+path = "fuzz_targets/create_will.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_beneficiaries"
+path = "fuzz_targets/update_beneficiaries.rs"
+test = false
+doc = false
+bench = false
