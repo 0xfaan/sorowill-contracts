@@ -3,15 +3,16 @@
 //! SoroWill — a trustless on-chain inheritance and dead man's switch protocol
 //! for Stellar Soroban.
 //!
-//! An owner locks a token (e.g. USDC) into a `Will`, names beneficiaries with
-//! percentage shares, and periodically calls [`WillContract::check_in`] to
-//! prove they are still active. If the owner misses a check-in deadline,
-//! anyone may call [`WillContract::trigger_will`] to start a grace period.
-//! The owner can still call [`WillContract::emergency_checkin`] during the
-//! grace period to prove they are alive and reset the countdown. If the
-//! grace period elapses without an emergency check-in, anyone may call
-//! [`WillContract::release_inheritance`] to split the locked balance among
-//! the beneficiaries proportionally to their configured percentages.
+//! An owner locks one or more tokens (e.g. USDC, XLM, any SEP-41 asset) into
+//! a `Will`, names beneficiaries with percentage shares, and periodically
+//! calls [`WillContract::check_in`] to prove they are still active. If the
+//! owner misses a check-in deadline, anyone may call
+//! [`WillContract::trigger_will`] to start a grace period. The owner can
+//! still call [`WillContract::emergency_checkin`] during the grace period to
+//! prove they are alive and reset the countdown. If the grace period elapses
+//! without an emergency check-in, anyone may call
+//! [`WillContract::release_inheritance`] to split every locked token balance
+//! among the beneficiaries proportionally to their configured percentages.
 //!
 //! Optionally, up to three guardians may be named on a will; any two of them
 //! calling [`WillContract::guardian_trigger`] force an immediate release,
@@ -26,7 +27,7 @@ mod types;
 #[cfg(test)]
 mod test;
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Map, Vec};
 
 pub use errors::WillError;
 pub use types::{Beneficiary, Will, WillStatus};
@@ -41,6 +42,9 @@ const MAX_BENEFICIARIES: u32 = 10;
 /// Maximum number of guardians a single will may have.
 const MAX_GUARDIANS: u32 = 3;
 
+/// Maximum number of distinct tokens a single will may hold.
+const MAX_TOKENS: u32 = 10;
+
 /// Number of distinct guardian votes required to force an early release.
 const GUARDIAN_THRESHOLD: u32 = 2;
 
@@ -49,10 +53,14 @@ pub struct WillContract;
 
 #[contractimpl]
 impl WillContract {
-    /// Creates a new will, locking `amount` of `token` in the contract.
+    /// Creates a new will, locking one or more token balances in the contract.
     ///
     /// # Parameters
     /// - `owner`: the address creating the will; must authorize this call.
+    /// - `tokens`: a list of `(token_address, amount)` pairs to lock. Each
+    ///   token address must be unique, each amount must be positive, and the
+    ///   list must contain between 1 and `MAX_TOKENS` entries.
+    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose percentages sum to exactly 100.
     /// - `token`: the token contract address (e.g. a USDC Stellar Asset Contract).
     /// - `amount`: the amount of `token` to lock, in the token's base units. Must be positive.
     /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points sum to exactly 10,000.
@@ -64,6 +72,10 @@ impl WillContract {
     /// The newly allocated will id.
     ///
     /// # Panics
+    /// - [`WillError::ZeroAmount`] if any token amount is not positive.
+    /// - [`WillError::TooManyBeneficiaries`] if the beneficiary/guardian/token lists are
+    ///   empty or exceed their respective caps.
+    /// - [`WillError::InvalidPercentages`] if beneficiary percentages do not sum to 100.
     /// - [`WillError::ZeroAmount`] if `amount` is not positive.
     /// - [`WillError::TooManyBeneficiaries`] if the beneficiary list is empty or too large,
     ///   or if too many guardians are supplied.
@@ -72,8 +84,7 @@ impl WillContract {
     pub fn create_will(
         env: Env,
         owner: Address,
-        token: Address,
-        amount: i128,
+        tokens: Vec<(Address, i128)>,
         beneficiaries: Vec<Beneficiary>,
         checkin_period_days: u64,
         grace_period_days: u64,
@@ -81,8 +92,8 @@ impl WillContract {
     ) -> u64 {
         owner.require_auth();
 
-        if amount <= 0 {
-            panic_with_error!(&env, WillError::ZeroAmount);
+        if tokens.is_empty() || tokens.len() > MAX_TOKENS {
+            panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
         if beneficiaries.is_empty()
             || beneficiaries.len() > MAX_BENEFICIARIES
@@ -92,12 +103,30 @@ impl WillContract {
         }
         assert_valid_percentages(&env, &beneficiaries);
 
+        // Validate amounts and build the balances map.
+        let mut balances: Map<Address, i128> = Map::new(&env);
+        for (token_addr, amount) in tokens.iter() {
+            if amount <= 0 {
+                panic_with_error!(&env, WillError::ZeroAmount);
+            }
+            // Transfer this token from the owner into the contract.
+            token::Client::new(&env, &token_addr).transfer(
+                &owner,
+                &env.current_contract_address(),
+                &amount,
+            );
+            // Accumulate in case the caller somehow duplicated the same token
+            // address twice — treat it as an additive top-up rather than
+            // silently overwriting.
+            let prev = balances.get(token_addr.clone()).unwrap_or(0);
+            balances.set(token_addr, prev + amount);
+        }
+
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
 
-        token::Client::new(&env, &token).transfer(&owner, &env.current_contract_address(), &amount);
-
         let beneficiaries_count = beneficiaries.len();
+        let token_count = balances.len();
         for beneficiary in beneficiaries.iter() {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
@@ -105,8 +134,7 @@ impl WillContract {
         let will = Will {
             id: will_id,
             owner: owner.clone(),
-            token,
-            balance: amount,
+            balances,
             beneficiaries,
             checkin_period_days,
             grace_period_days,
@@ -123,7 +151,7 @@ impl WillContract {
             &env,
             will_id,
             &owner,
-            amount,
+            token_count,
             beneficiaries_count,
             now + checkin_period_days * SECONDS_PER_DAY,
         );
@@ -208,7 +236,7 @@ impl WillContract {
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
     }
 
-    /// Distributes the will's balance to all beneficiaries proportionally to
+    /// Distributes all token balances to beneficiaries proportionally to
     /// their configured percentages. Callable by anyone once the grace
     /// period has fully elapsed. Any rounding remainder from integer
     /// division is paid to the final beneficiary so the full balance is
@@ -235,7 +263,7 @@ impl WillContract {
         distribute(&env, &mut will);
     }
 
-    /// Cancels the will and refunds the full locked balance to the owner.
+    /// Cancels the will and refunds every locked token balance to the owner.
     /// Only possible while the will is `Active`, i.e. before it has ever
     /// been triggered by a missed check-in (an owner who is mid-grace-period
     /// must first call `emergency_checkin` to return the will to `Active`).
@@ -248,18 +276,25 @@ impl WillContract {
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        let refund = will.balance;
-        token::Client::new(&env, &will.token).transfer(
-            &env.current_contract_address(),
-            &owner,
-            &refund,
-        );
+        let contract_address = env.current_contract_address();
+        let token_count = will.balances.len();
 
-        will.balance = 0;
+        // Refund every token balance back to the owner.
+        for (token_addr, balance) in will.balances.iter() {
+            if balance > 0 {
+                token::Client::new(&env, &token_addr).transfer(
+                    &contract_address,
+                    &owner,
+                    &balance,
+                );
+            }
+        }
+
+        will.balances = Map::new(&env);
         will.status = WillStatus::Cancelled;
         storage::save_will(&env, &will);
 
-        events::will_cancelled(&env, will_id, &owner, refund);
+        events::will_cancelled(&env, will_id, &owner, token_count);
     }
 
     /// Replaces the beneficiary list for `will_id`. Only possible while the
@@ -324,14 +359,16 @@ impl WillContract {
         events::guardians_updated(&env, will_id, &owner);
     }
 
-    /// Adds `amount` more of the will's token to its locked balance. Only
-    /// possible while the will is `Active`.
+    /// Adds `amount` of a specific `token` to an existing will's locked
+    /// balance. Only possible while the will is `Active`. The token does not
+    /// need to have been part of the original `create_will` call — new tokens
+    /// can be added via `top_up`.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::ZeroAmount`] if `amount` is not positive.
-    pub fn top_up(env: Env, will_id: u64, owner: Address, amount: i128) {
+    pub fn top_up(env: Env, will_id: u64, owner: Address, token: Address, amount: i128) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
@@ -340,16 +377,18 @@ impl WillContract {
             panic_with_error!(&env, WillError::ZeroAmount);
         }
 
-        token::Client::new(&env, &will.token).transfer(
+        token::Client::new(&env, &token).transfer(
             &owner,
             &env.current_contract_address(),
             &amount,
         );
 
-        will.balance += amount;
+        let prev = will.balances.get(token.clone()).unwrap_or(0);
+        let new_balance = prev + amount;
+        will.balances.set(token.clone(), new_balance);
         storage::save_will(&env, &will);
 
-        events::top_up(&env, will_id, &owner, amount, will.balance);
+        events::top_up(&env, will_id, &owner, &token, amount, new_balance);
     }
 
     /// Returns the full on-chain state of `will_id`.
@@ -386,7 +425,7 @@ impl WillContract {
 
     /// Casts a guardian vote to force an early release of `will_id`, for use
     /// when the owner is known to be incapacitated. Once
-    /// [`GUARDIAN_THRESHOLD`] distinct guardians have voted, the balance is
+    /// [`GUARDIAN_THRESHOLD`] distinct guardians have voted, all balances are
     /// immediately distributed to beneficiaries, bypassing the check-in and
     /// grace-period flow entirely.
     ///
@@ -453,16 +492,39 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     }
 }
 
+/// For each token in `will.balances`, splits the balance across
+/// `will.beneficiaries` proportionally to their percentages, transfers the
+/// shares out of the contract, clears the balances map, marks the will
+/// `Released`, and publishes the `InheritanceReleased` event. Any rounding
+/// remainder from integer division is paid to the final beneficiary so the
+/// full balance of every token is always distributed with no dust left behind.
 /// Splits `will.balance` across `will.beneficiaries` proportionally to their
 /// basis-point shares, transfers the shares out of the contract, marks the
 /// will `Released`, and publishes the `InheritanceReleased` event. Any
 /// rounding remainder from integer division is paid to the final beneficiary.
 fn distribute(env: &Env, will: &mut Will) {
-    let token_client = token::Client::new(env, &will.token);
     let contract_address = env.current_contract_address();
-    let total = will.balance;
     let count = will.beneficiaries.len();
+    let token_count = will.balances.len();
 
+    for (token_addr, total) in will.balances.iter() {
+        if total == 0 {
+            continue;
+        }
+        let token_client = token::Client::new(env, &token_addr);
+        let mut remaining = total;
+
+        for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
+            let share = if index as u32 == count - 1 {
+                remaining
+            } else {
+                let portion = total * (beneficiary.percentage as i128) / 100;
+                remaining -= portion;
+                portion
+            };
+            if share > 0 {
+                token_client.transfer(&contract_address, &beneficiary.address, &share);
+            }
     let mut remaining = total;
     for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
         let share = if index as u32 == count - 1 {
@@ -477,9 +539,9 @@ fn distribute(env: &Env, will: &mut Will) {
         }
     }
 
-    will.balance = 0;
+    will.balances = Map::new(env);
     will.status = WillStatus::Released;
     storage::save_will(env, will);
 
-    events::inheritance_released(env, will.id, total, count);
+    events::inheritance_released(env, will.id, token_count, count);
 }
