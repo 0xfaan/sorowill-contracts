@@ -7,11 +7,13 @@
 use soroban_sdk::{symbol_short, Address, Env};
 
 /// Published when a new will is created.
+///
+/// `token_count` is the number of distinct tokens locked at creation time.
 pub fn will_created(
     env: &Env,
     will_id: u64,
     owner: &Address,
-    balance: i128,
+    token_count: u32,
     beneficiaries_count: u32,
     checkin_deadline: u64,
 ) {
@@ -19,7 +21,7 @@ pub fn will_created(
         (symbol_short!("created"), will_id),
         (
             owner.clone(),
-            balance,
+            token_count,
             beneficiaries_count,
             checkin_deadline,
         ),
@@ -50,23 +52,27 @@ pub fn emergency_checkin(env: &Env, will_id: u64, owner: &Address, next_deadline
 }
 
 /// Published when inheritance is released to all beneficiaries.
+///
+/// `token_count` is the number of distinct tokens distributed.
 pub fn inheritance_released(
     env: &Env,
     will_id: u64,
-    total_released: i128,
+    token_count: u32,
     beneficiaries_count: u32,
 ) {
     env.events().publish(
         (symbol_short!("released"), will_id),
-        (total_released, beneficiaries_count),
+        (token_count, beneficiaries_count),
     );
 }
 
-/// Published when the owner cancels the will and withdraws the balance.
-pub fn will_cancelled(env: &Env, will_id: u64, owner: &Address, refund_amount: i128) {
+/// Published when the owner cancels the will and withdraws all token balances.
+///
+/// `token_count` is the number of distinct tokens refunded.
+pub fn will_cancelled(env: &Env, will_id: u64, owner: &Address, token_count: u32) {
     env.events().publish(
         (symbol_short!("cancelled"), will_id),
-        (owner.clone(), refund_amount),
+        (owner.clone(), token_count),
     );
 }
 
@@ -80,11 +86,22 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
+/// Published when the owner tops up a specific token's balance in the will.
+pub fn top_up(
+    env: &Env,
+    will_id: u64,
+    owner: &Address,
+    token: &Address,
+    amount: i128,
+    new_balance: i128,
+) {
     env.events().publish(
         (symbol_short!("topup"), will_id),
-        (owner.clone(), amount, new_balance),
+        (owner.clone(), token.clone(), amount, new_balance),
     );
 }
 
@@ -107,5 +124,10 @@ pub fn wills_merged(
     env.events().publish(
         (symbol_short!("merged"), surviving_will_id),
         (owner.clone(), consumed_will_id, new_balance),
+/// Published when a will is migrated to a new schema version.
+pub fn will_migrated(env: &Env, will_id: u64, owner: &Address, from_version: u32, to_version: u32) {
+    env.events().publish(
+        (symbol_short!("migrated"), will_id),
+        (owner.clone(), from_version, to_version),
     );
 }

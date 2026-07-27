@@ -41,4 +41,9 @@ pub enum WillError {
     SameWillId = 15,
     /// Cannot merge: merging would result in too many beneficiaries or guardians.
     MergeWouldExceedLimits = 16,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 13,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 14,
 }
