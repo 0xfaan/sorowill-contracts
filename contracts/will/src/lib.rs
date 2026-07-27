@@ -49,6 +49,16 @@ use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env,
 pub use errors::WillError;
 pub use types::{Beneficiary, ProtocolStats, Will, WillStatus};
 
+/// Semantic version of the contract logic, encoded as
+/// `major * 1_000_000 + minor * 1_000 + patch`.
+///
+/// Bump this constant in every PR that changes observable contract behaviour
+/// so that SDKs and apps can detect version mismatches at runtime via
+/// [`WillContract::get_contract_version`].
+///
+/// Current baseline: **1.0.0** → `1_000_000`.
+pub const CONTRACT_VERSION: u32 = 1_000_000;
+
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
 const SECONDS_PER_DAY: u64 = 86_400;
@@ -472,6 +482,15 @@ impl WillContract {
         storage::save_will(&env, &will);
 
         events::top_up(&env, will_id, &owner, &token, amount, new_balance);
+    }
+
+    /// Returns the contract version as a `u32` encoded semver value:
+    /// `major * 1_000_000 + minor * 1_000 + patch`.
+    ///
+    /// SDKs and apps can call this to detect version mismatches before
+    /// submitting transactions that depend on specific contract behaviour.
+    pub fn get_contract_version(_env: Env) -> u32 {
+        CONTRACT_VERSION
     }
 
     /// Returns the full on-chain state of `will_id`.

@@ -6,7 +6,7 @@ use soroban_sdk::{
     vec, Address, Env,
 };
 
-use crate::{Beneficiary, WillContract, WillContractClient, WillStatus};
+use crate::{Beneficiary, WillContract, WillContractClient, WillStatus, CONTRACT_VERSION};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -107,6 +107,14 @@ fn advance_time(env: &Env, seconds: u64) {
     env.ledger().with_mut(|l| {
         l.timestamp += seconds;
     });
+}
+
+#[test]
+fn test_get_contract_version() {
+    let (_, client, _, _, _) = setup();
+    // Baseline version is 1.0.0, encoded as 1_000_000.
+    assert_eq!(client.get_contract_version(), CONTRACT_VERSION);
+    assert_eq!(client.get_contract_version(), 1_000_000);
 }
 
 const DAY: u64 = 86_400;
