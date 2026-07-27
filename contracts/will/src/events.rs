@@ -4,14 +4,16 @@
 //! off-chain indexers (such as the SoroWill SDK/app) can reconstruct will
 //! history without re-simulating transactions.
 
-use soroban_sdk::{symbol_short, Address, Env};
+use soroban_sdk::{symbol_short, Address, Env, Vec};
 
 /// Published when a new will is created.
+///
+/// `token_count` is the number of distinct tokens locked at creation time.
 pub fn will_created(
     env: &Env,
     will_id: u64,
     owner: &Address,
-    balance: i128,
+    token_count: u32,
     beneficiaries_count: u32,
     checkin_deadline: u64,
 ) {
@@ -19,7 +21,7 @@ pub fn will_created(
         (symbol_short!("created"), will_id),
         (
             owner.clone(),
-            balance,
+            token_count,
             beneficiaries_count,
             checkin_deadline,
         ),
@@ -50,23 +52,34 @@ pub fn emergency_checkin(env: &Env, will_id: u64, owner: &Address, next_deadline
 }
 
 /// Published when inheritance is released to all beneficiaries.
+///
+/// `token_count` is the number of distinct tokens distributed.
 pub fn inheritance_released(
     env: &Env,
     will_id: u64,
     total_released: i128,
+    breakdown: &Vec<(Address, u32, i128)>,
+    guardian_triggered: bool,
+) {
+    env.events().publish(
+        (symbol_short!("released"), will_id),
+        (total_released, guardian_triggered, breakdown.clone()),
+    token_count: u32,
     beneficiaries_count: u32,
 ) {
     env.events().publish(
         (symbol_short!("released"), will_id),
-        (total_released, beneficiaries_count),
+        (token_count, beneficiaries_count),
     );
 }
 
-/// Published when the owner cancels the will and withdraws the balance.
-pub fn will_cancelled(env: &Env, will_id: u64, owner: &Address, refund_amount: i128) {
+/// Published when the owner cancels the will and withdraws all token balances.
+///
+/// `token_count` is the number of distinct tokens refunded.
+pub fn will_cancelled(env: &Env, will_id: u64, owner: &Address, token_count: u32) {
     env.events().publish(
         (symbol_short!("cancelled"), will_id),
-        (owner.clone(), refund_amount),
+        (owner.clone(), token_count),
     );
 }
 
@@ -82,64 +95,70 @@ pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
         .publish((symbol_short!("guardup"), will_id), owner.clone());
 }
 
+/// Published when the owner closes a Released will, marking it Settled.
+pub fn will_closed(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("closed"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
+/// Published when the owner tops up a specific token's balance in the will.
+pub fn top_up(
+    env: &Env,
+    will_id: u64,
+    owner: &Address,
+    token: &Address,
+    amount: i128,
+    new_balance: i128,
+) {
     env.events().publish(
         (symbol_short!("topup"), will_id),
-        (owner.clone(), amount, new_balance),
+        (owner.clone(), token.clone(), amount, new_balance),
     );
 }
 
 /// Published each time a guardian votes to trigger an early release.
-pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far: u32) {
+pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, weight: u32, total_weight: u32) {
     env.events().publish(
         (symbol_short!("gvote"), will_id),
-        (guardian.clone(), votes_so_far),
+        (guardian.clone(), weight, total_weight),
     );
 }
 
-/// Published when a beneficiary claims their share from a pull-based distribution.
-pub fn share_claimed(env: &Env, will_id: u64, beneficiary: &Address, amount: i128) {
-    env.events().publish(
-        (symbol_short!("claimed"), will_id),
-        (beneficiary.clone(), amount),
-    );
-}
-
-/// Published when a fallback beneficiary receives a share that failed to
-/// transfer to the original beneficiary.
-pub fn fallback_transfer(env: &Env, will_id: u64, fallback: &Address, amount: i128) {
-    env.events().publish(
-        (symbol_short!("fbxfer"), will_id),
-        (fallback.clone(), amount),
-    );
-}
-
-/// Published when a guardian accepts their role.
-pub fn guardian_role_accepted(env: &Env, will_id: u64, guardian: &Address) {
-    env.events().publish(
-        (symbol_short!("gaccept"), will_id),
-        guardian.clone(),
-    );
-}
-
-/// Published when a guardian requests replacement.
-pub fn guardian_replacement_requested(env: &Env, will_id: u64, guardian: &Address) {
-    env.events().publish(
-        (symbol_short!("grepreq"), will_id),
-        guardian.clone(),
-    );
-}
-
-/// Published when the owner sets or clears the fallback beneficiary.
-pub fn fallback_beneficiary_updated(
+/// Published when two wills are merged into one.
+pub fn wills_merged(
     env: &Env,
-    will_id: u64,
+    surviving_will_id: u64,
+    consumed_will_id: u64,
     owner: &Address,
-    fallback: &Option<Address>,
+    new_balance: i128,
 ) {
     env.events().publish(
-        (symbol_short!("fbupdate"), will_id),
-        (owner.clone(), fallback.clone()),
+        (symbol_short!("merged"), surviving_will_id),
+        (owner.clone(), consumed_will_id, new_balance),
+/// Published when a will is migrated to a new schema version.
+pub fn will_migrated(env: &Env, will_id: u64, owner: &Address, from_version: u32, to_version: u32) {
+    env.events().publish(
+        (symbol_short!("migrated"), will_id),
+        (owner.clone(), from_version, to_version),
     );
+}
+
+/// Published when a will is cloned from a template.
+pub fn will_cloned(env: &Env, source_id: u64, new_id: u64, owner: &Address) {
+    env.events().publish(
+        (symbol_short!("cloned"), new_id),
+        (source_id, owner.clone()),
+    );
+}
+
+/// Published when a batch of wills is created in a single transaction.
+pub fn batch_created(env: &Env, owner: &Address, will_ids: &soroban_sdk::Vec<u64>) {
+    env.events()
+        .publish((symbol_short!("batch"), owner.clone()), will_ids.clone());
+/// Published when a Released or Cancelled will is archived.
+pub fn will_archived(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("archived"), will_id), owner.clone());
 }

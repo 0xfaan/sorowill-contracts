@@ -21,7 +21,7 @@ pub enum WillError {
     GracePeriodNotExpired = 5,
     /// `emergency_checkin` was called after the grace period already elapsed.
     GracePeriodExpired = 6,
-    /// Beneficiary percentages did not sum to exactly 100.
+    /// Beneficiary percentages did not sum to exactly 10,000.
     InvalidPercentages = 7,
     /// The guardian has already voted to trigger this will.
     AlreadyVoted = 8,
@@ -33,14 +33,25 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
-    /// The beneficiary has already claimed their share.
-    AlreadyClaimed = 13,
-    /// No claimable share found for this beneficiary.
-    NoClaimableShare = 14,
-    /// The guardian has not accepted their role.
-    GuardianNotAccepted = 15,
-    /// The caller is not a named guardian of this will.
-    NotNamedGuardian = 16,
-    /// A token transfer failed (used for fallback routing).
-    TransferFailed = 17,
+    /// The requested action requires the will to be `Released` or `Cancelled`.
+    WillNotSettled = 13,
+    /// The requested action requires the will to be `Released`.
+    WillNotReleased = 13,
+    /// Cannot merge: both wills must be owned by the same address.
+    NotSameOwner = 13,
+    /// Cannot merge: one or both wills are not in Active status.
+    WillNotBothActive = 14,
+    /// Cannot merge: same will id provided for both wills.
+    SameWillId = 15,
+    /// Cannot merge: merging would result in too many beneficiaries or guardians.
+    MergeWouldExceedLimits = 16,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 13,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 14,
+    /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
+    /// blocked until the cooldown period passes after the last guardian-list
+    /// change.
+    GuardianCooldownActive = 15,
 }
