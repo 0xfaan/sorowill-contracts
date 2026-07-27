@@ -80,6 +80,8 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(
@@ -93,5 +95,51 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far:
     env.events().publish(
         (symbol_short!("gvote"), will_id),
         (guardian.clone(), votes_so_far),
+    );
+}
+
+/// Published when a beneficiary claims their share from a pull-based distribution.
+pub fn share_claimed(env: &Env, will_id: u64, beneficiary: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("claimed"), will_id),
+        (beneficiary.clone(), amount),
+    );
+}
+
+/// Published when a fallback beneficiary receives a share that failed to
+/// transfer to the original beneficiary.
+pub fn fallback_transfer(env: &Env, will_id: u64, fallback: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("fbxfer"), will_id),
+        (fallback.clone(), amount),
+    );
+}
+
+/// Published when a guardian accepts their role.
+pub fn guardian_role_accepted(env: &Env, will_id: u64, guardian: &Address) {
+    env.events().publish(
+        (symbol_short!("gaccept"), will_id),
+        guardian.clone(),
+    );
+}
+
+/// Published when a guardian requests replacement.
+pub fn guardian_replacement_requested(env: &Env, will_id: u64, guardian: &Address) {
+    env.events().publish(
+        (symbol_short!("grepreq"), will_id),
+        guardian.clone(),
+    );
+}
+
+/// Published when the owner sets or clears the fallback beneficiary.
+pub fn fallback_beneficiary_updated(
+    env: &Env,
+    will_id: u64,
+    owner: &Address,
+    fallback: &Option<Address>,
+) {
+    env.events().publish(
+        (symbol_short!("fbupdate"), will_id),
+        (owner.clone(), fallback.clone()),
     );
 }

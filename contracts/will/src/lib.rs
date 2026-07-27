@@ -16,7 +16,15 @@
 //! Optionally, up to three guardians may be named on a will; any two of them
 //! calling [`WillContract::guardian_trigger`] force an immediate release,
 //! bypassing the check-in/grace-period flow entirely (e.g. if the owner is
-//! known to be incapacitated).
+//! known to be incapacitated). Guardians must first accept their role via
+//! [`WillContract::accept_guardian_role`] before they can vote.
+//!
+//! Two distribution modes are supported:
+//! - **Push mode** (default): `distribute` transfers tokens directly to each
+//!   beneficiary in a single call.
+//! - **Pull mode**: `distribute` stores each beneficiary's share as a
+//!   claimable amount. Beneficiaries call [`WillContract::claim_share`]
+//!   independently to withdraw their share.
 
 mod errors;
 mod events;
@@ -29,7 +37,7 @@ mod test;
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus};
+pub use types::{Beneficiary, ClaimableShare, GuardianConsent, Will, WillStatus};
 
 /// Number of seconds in a day, used to convert the day-denominated periods
 /// stored on a `Will` into absolute ledger timestamps.
@@ -59,6 +67,11 @@ impl WillContract {
     /// - `checkin_period_days`: how many days the owner may go without checking in.
     /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
     /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
+    /// - `pull_distribution`: when `true`, `distribute` stores claimable shares
+    ///   instead of pushing tokens directly. Beneficiaries must call `claim_share`.
+    /// - `fallback_beneficiary`: optional address that receives shares when a
+    ///   direct transfer fails. If `None`, failed transfers keep funds in the
+    ///   contract as claimable shares.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -78,6 +91,8 @@ impl WillContract {
         checkin_period_days: u64,
         grace_period_days: u64,
         guardians: Vec<Address>,
+        pull_distribution: bool,
+        fallback_beneficiary: Option<Address>,
     ) -> u64 {
         owner.require_auth();
 
@@ -102,6 +117,14 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
+        for guardian in guardians.iter() {
+            storage::set_guardian_consent(&env, will_id, &guardian, &GuardianConsent::Pending);
+        }
+
+        if let Some(ref fb) = fallback_beneficiary {
+            storage::set_fallback_beneficiary(&env, will_id, fb);
+        }
+
         let will = Will {
             id: will_id,
             owner: owner.clone(),
@@ -115,6 +138,8 @@ impl WillContract {
             status: WillStatus::Active,
             guardians,
             guardian_votes: 0,
+            pull_distribution,
+            fallback_beneficiary,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -214,6 +239,11 @@ impl WillContract {
     /// division is paid to the final beneficiary so the full balance is
     /// always distributed with no dust left behind.
     ///
+    /// In push mode (the default), tokens are transferred directly to each
+    /// beneficiary. In pull mode (`pull_distribution = true`), shares are
+    /// stored in claimable-shares storage and beneficiaries must call
+    /// `claim_share` to withdraw.
+    ///
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
@@ -300,7 +330,8 @@ impl WillContract {
 
     /// Replaces the guardian list for `will_id`. Only possible while the will
     /// is `Active`. Any votes cast against the previous guardian list are
-    /// cleared so every updated list starts a fresh voting cycle.
+    /// cleared so every updated list starts a fresh voting cycle. Consent
+    /// entries for the old guardians are also cleared.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
@@ -317,6 +348,12 @@ impl WillContract {
         }
 
         storage::reset_guardian_votes(&env, will_id, &will.guardians);
+        storage::reset_guardian_consents(&env, will_id, &will.guardians);
+
+        for guardian in guardians.iter() {
+            storage::set_guardian_consent(&env, will_id, &guardian, &GuardianConsent::Pending);
+        }
+
         will.guardians = guardians;
         will.guardian_votes = 0;
         storage::save_will(&env, &will);
@@ -390,10 +427,14 @@ impl WillContract {
     /// immediately distributed to beneficiaries, bypassing the check-in and
     /// grace-period flow entirely.
     ///
+    /// The guardian must have accepted their role via `accept_guardian_role`
+    /// before casting a vote.
+    ///
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::NotGuardian`] if `guardian` is not one of the will's guardians.
     /// - [`WillError::AlreadyVoted`] if `guardian` already voted in this cycle.
+    /// - [`WillError::GuardianNotAccepted`] if `guardian` has not accepted their role.
     pub fn guardian_trigger(env: Env, will_id: u64, guardian: Address) {
         guardian.require_auth();
         let mut will = load_will(&env, will_id);
@@ -402,6 +443,12 @@ impl WillContract {
         if !will.guardians.contains(&guardian) {
             panic_with_error!(&env, WillError::NotGuardian);
         }
+
+        let consent = storage::get_guardian_consent(&env, will_id, &guardian);
+        if consent != GuardianConsent::Accepted {
+            panic_with_error!(&env, WillError::GuardianNotAccepted);
+        }
+
         if storage::has_guardian_voted(&env, will_id, &guardian) {
             panic_with_error!(&env, WillError::AlreadyVoted);
         }
@@ -415,6 +462,144 @@ impl WillContract {
         if will.guardian_votes >= GUARDIAN_THRESHOLD {
             distribute(&env, &mut will);
         }
+    }
+
+    /// Claims the caller's share from a pull-based distribution. The will must
+    /// be `Released` with `pull_distribution = true`. The caller must be a
+    /// named beneficiary who has not yet claimed.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    /// - [`WillError::WillNotActive`] if the will is not `Released`.
+    /// - [`WillError::NotOwner`] if `beneficiary` is not a named beneficiary.
+    /// - [`WillError::NoClaimableShare`] if no claimable share exists.
+    /// - [`WillError::AlreadyClaimed`] if the beneficiary already claimed.
+    pub fn claim_share(env: Env, will_id: u64, beneficiary: Address) {
+        beneficiary.require_auth();
+        let will = load_will(&env, will_id);
+        assert_status(&env, &will, WillStatus::Released, WillError::WillNotActive);
+
+        if !will.pull_distribution {
+            panic_with_error!(&env, WillError::WillNotActive);
+        }
+
+        if !will.beneficiaries.contains(&beneficiary) {
+            panic_with_error!(&env, WillError::NotOwner);
+        }
+
+        let mut share =
+            storage::get_claimable_share(&env, will_id, &beneficiary).unwrap_or_else(|e| {
+                panic_with_error!(&env, e);
+            });
+
+        if share.claimed > 0 {
+            panic_with_error!(&env, WillError::AlreadyClaimed);
+        }
+
+        let amount = share.total;
+        share.claimed = amount;
+        storage::set_claimable_share(&env, will_id, &beneficiary, &share);
+
+        let token_client = token::Client::new(&env, &will.token);
+        let contract_address = env.current_contract_address();
+
+        if let Some(ref fallback) = will.fallback_beneficiary {
+            let result = token_client.try_transfer(&contract_address, fallback, &amount);
+            if result.is_err() {
+                events::share_claimed(&env, will_id, &beneficiary, 0);
+                return;
+            }
+            events::share_claimed(&env, will_id, &beneficiary, amount);
+            events::fallback_transfer(&env, will_id, fallback, amount);
+        } else {
+            let result = token_client.try_transfer(&contract_address, &beneficiary, &amount);
+            if result.is_err() {
+                events::share_claimed(&env, will_id, &beneficiary, 0);
+                return;
+            }
+            events::share_claimed(&env, will_id, &beneficiary, amount);
+        }
+    }
+
+    /// Sets the optional fallback beneficiary for `will_id`. When set, shares
+    /// that fail to transfer during distribution or claiming are routed to the
+    /// fallback address. Pass `None` to clear the fallback.
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    pub fn set_fallback_beneficiary(
+        env: Env,
+        will_id: u64,
+        owner: Address,
+        fallback: Option<Address>,
+    ) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if let Some(ref fb) = fallback {
+            storage::set_fallback_beneficiary(&env, will_id, fb);
+        } else {
+            storage::clear_fallback_beneficiary(&env, will_id);
+        }
+
+        will.fallback_beneficiary = fallback;
+        storage::save_will(&env, &will);
+
+        events::fallback_beneficiary_updated(&env, will_id, &owner, &will.fallback_beneficiary);
+    }
+
+    /// Returns the fallback beneficiary for `will_id`, if any.
+    pub fn get_fallback_beneficiary(env: Env, will_id: u64) -> Option<Address> {
+        storage::get_fallback_beneficiary(&env, will_id)
+    }
+
+    /// Accepts the guardian role for `will_id`. A named guardian must call
+    /// this before they can cast a `guardian_trigger` vote.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    /// - [`WillError::NotNamedGuardian`] if `guardian` is not a named guardian.
+    /// - [`WillError::AlreadyVoted`] if the guardian has already accepted.
+    pub fn accept_guardian_role(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let will = load_will(&env, will_id);
+
+        if !will.guardians.contains(&guardian) {
+            panic_with_error!(&env, WillError::NotNamedGuardian);
+        }
+
+        let consent = storage::get_guardian_consent(&env, will_id, &guardian);
+        if consent == GuardianConsent::Accepted {
+            panic_with_error!(&env, WillError::AlreadyVoted);
+        }
+
+        storage::set_guardian_consent(&env, will_id, &guardian, &GuardianConsent::Accepted);
+
+        events::guardian_role_accepted(&env, will_id, &guardian);
+    }
+
+    /// Requests replacement of the calling guardian. The guardian must be a
+    /// named guardian of the will. The owner can then update guardians via
+    /// `update_guardians`.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::NotNamedGuardian`] if `guardian` is not a named guardian.
+    pub fn request_guardian_replacement(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let will = load_will(&env, will_id);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        if !will.guardians.contains(&guardian) {
+            panic_with_error!(&env, WillError::NotNamedGuardian);
+        }
+
+        storage::set_guardian_pending_replacement(&env, will_id);
+
+        events::guardian_replacement_requested(&env, will_id, &guardian);
     }
 }
 
@@ -454,26 +639,58 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
 }
 
 /// Splits `will.balance` across `will.beneficiaries` proportionally to their
-/// basis-point shares, transfers the shares out of the contract, marks the
+/// basis-point shares. In push mode, transfers the shares out of the contract
+/// directly. In pull mode, stores each share as a claimable amount. Marks the
 /// will `Released`, and publishes the `InheritanceReleased` event. Any
 /// rounding remainder from integer division is paid to the final beneficiary.
 fn distribute(env: &Env, will: &mut Will) {
-    let token_client = token::Client::new(env, &will.token);
-    let contract_address = env.current_contract_address();
     let total = will.balance;
     let count = will.beneficiaries.len();
 
-    let mut remaining = total;
-    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
-        let share = if index as u32 == count - 1 {
-            remaining
-        } else {
-            let portion = total * (beneficiary.basis_points as i128) / 10_000;
-            remaining -= portion;
-            portion
-        };
-        if share > 0 {
-            token_client.transfer(&contract_address, &beneficiary.address, &share);
+    if will.pull_distribution {
+        let mut remaining = total;
+        for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
+            let share = if index as u32 == count - 1 {
+                remaining
+            } else {
+                let portion = total * (beneficiary.basis_points as i128) / 10_000;
+                remaining -= portion;
+                portion
+            };
+            if share > 0 {
+                let claimable = ClaimableShare {
+                    total: share,
+                    claimed: 0,
+                };
+                storage::set_claimable_share(env, will.id, &beneficiary.address, &claimable);
+            }
+        }
+    } else {
+        let token_client = token::Client::new(env, &will.token);
+        let contract_address = env.current_contract_address();
+        let fallback = storage::get_fallback_beneficiary(env, will.id);
+
+        let mut remaining = total;
+        for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
+            let share = if index as u32 == count - 1 {
+                remaining
+            } else {
+                let portion = total * (beneficiary.basis_points as i128) / 10_000;
+                remaining -= portion;
+                portion
+            };
+            if share > 0 {
+                let result =
+                    token_client.try_transfer(&contract_address, &beneficiary.address, &share);
+                if result.is_err() {
+                    if let Some(ref fb) = fallback {
+                        let fb_result = token_client.try_transfer(&contract_address, fb, &share);
+                        if fb_result.is_ok() {
+                            events::fallback_transfer(env, will.id, fb, share);
+                        }
+                    }
+                }
+            }
         }
     }
 

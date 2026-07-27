@@ -10,7 +10,7 @@
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::Will;
+use crate::types::{ClaimableShare, GuardianConsent, Will};
 
 /// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
 /// is approximately 17,280 ledgers.
@@ -35,6 +35,14 @@ enum DataKey {
     BeneficiaryWills(Address),
     /// Whether a guardian has already voted in the current trigger cycle.
     GuardianVote(u64, Address),
+    /// A beneficiary's claimable share in a pull-based distribution.
+    ClaimableShare(u64, Address),
+    /// Consent status for a named guardian.
+    GuardianConsent(u64, Address),
+    /// Whether a guardian has requested replacement.
+    GuardianPendingReplacement(u64),
+    /// The fallback beneficiary for a will.
+    FallbackBeneficiary(u64),
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
@@ -157,4 +165,109 @@ pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Address>) {
         let key = DataKey::GuardianVote(will_id, guardian.clone());
         env.storage().persistent().remove(&key);
     }
+}
+
+// ── Claimable shares (pull-based distribution) ───────────────────────────────
+
+/// Stores a claimable share for a beneficiary in a pull-based distribution.
+pub fn set_claimable_share(env: &Env, will_id: u64, beneficiary: &Address, share: &ClaimableShare) {
+    let key = DataKey::ClaimableShare(will_id, beneficiary.clone());
+    env.storage().persistent().set(&key, share);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Loads a beneficiary's claimable share, returning `WillError::NoClaimableShare`
+/// if none exists.
+pub fn get_claimable_share(
+    env: &Env,
+    will_id: u64,
+    beneficiary: &Address,
+) -> Result<ClaimableShare, WillError> {
+    let key = DataKey::ClaimableShare(will_id, beneficiary.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .ok_or(WillError::NoClaimableShare)
+}
+
+// ── Guardian consent ─────────────────────────────────────────────────────────
+
+/// Returns the consent status for a guardian on a will.
+/// Defaults to `Pending` if no entry exists.
+pub fn get_guardian_consent(env: &Env, will_id: u64, guardian: &Address) -> GuardianConsent {
+    let key = DataKey::GuardianConsent(will_id, guardian.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(GuardianConsent::Pending)
+}
+
+/// Sets the consent status for a guardian on a will.
+pub fn set_guardian_consent(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    consent: &GuardianConsent,
+) {
+    let key = DataKey::GuardianConsent(will_id, guardian.clone());
+    env.storage().persistent().set(&key, consent);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Clears all guardian consent entries for the given guardians.
+pub fn reset_guardian_consents(env: &Env, will_id: u64, guardians: &Vec<Address>) {
+    for guardian in guardians.iter() {
+        let key = DataKey::GuardianConsent(will_id, guardian.clone());
+        env.storage().persistent().remove(&key);
+    }
+}
+
+// ── Guardian pending replacement ─────────────────────────────────────────────
+
+/// Returns whether any guardian has requested replacement for `will_id`.
+pub fn has_guardian_pending_replacement(env: &Env, will_id: u64) -> bool {
+    let key = DataKey::GuardianPendingReplacement(will_id);
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+/// Sets the guardian pending replacement flag for `will_id`.
+pub fn set_guardian_pending_replacement(env: &Env, will_id: u64) {
+    let key = DataKey::GuardianPendingReplacement(will_id);
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Clears the guardian pending replacement flag for `will_id`.
+pub fn clear_guardian_pending_replacement(env: &Env, will_id: u64) {
+    let key = DataKey::GuardianPendingReplacement(will_id);
+    env.storage().persistent().remove(&key);
+}
+
+// ── Fallback beneficiary ─────────────────────────────────────────────────────
+
+/// Stores the fallback beneficiary for a will.
+pub fn set_fallback_beneficiary(env: &Env, will_id: u64, fallback: &Address) {
+    let key = DataKey::FallbackBeneficiary(will_id);
+    env.storage().persistent().set(&key, fallback);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Loads the fallback beneficiary for a will, returning `None` if unset.
+pub fn get_fallback_beneficiary(env: &Env, will_id: u64) -> Option<Address> {
+    let key = DataKey::FallbackBeneficiary(will_id);
+    env.storage().persistent().get(&key)
+}
+
+/// Removes the fallback beneficiary for a will.
+pub fn clear_fallback_beneficiary(env: &Env, will_id: u64) {
+    let key = DataKey::FallbackBeneficiary(will_id);
+    env.storage().persistent().remove(&key);
 }

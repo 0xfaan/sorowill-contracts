@@ -33,4 +33,14 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// The beneficiary has already claimed their share.
+    AlreadyClaimed = 13,
+    /// No claimable share found for this beneficiary.
+    NoClaimableShare = 14,
+    /// The guardian has not accepted their role.
+    GuardianNotAccepted = 15,
+    /// The caller is not a named guardian of this will.
+    NotNamedGuardian = 16,
+    /// A token transfer failed (used for fallback routing).
+    TransferFailed = 17,
 }
