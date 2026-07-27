@@ -6,6 +6,8 @@
 
 use soroban_sdk::{symbol_short, Address, Env, Vec};
 
+use crate::types::GuardianVoteReason;
+
 /// Published when a new will is created.
 ///
 /// `token_count` is the number of distinct tokens locked at creation time.
