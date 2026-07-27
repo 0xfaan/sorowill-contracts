@@ -18,14 +18,23 @@
 //! [`WillContract::release_inheritance`] to split every locked token balance
 //! among the beneficiaries proportionally to their configured percentages.
 //!
-//! Optionally, up to three guardians (with tier distinction: primary or
-//! backup) may be named on a will; any two of them calling
-//! [`WillContract::guardian_trigger`] force an immediate release.
+//! Optionally, up to three guardians may be named on a will; any two of them
+//! calling [`WillContract::guardian_trigger`] force an immediate release,
+//! bypassing the check-in/grace-period flow entirely (e.g. if the owner is
+//! known to be incapacitated). Guardians must first accept their role via
+//! [`WillContract::accept_guardian_role`] before they can vote.
 //!
-//! The owner may designate a delegate to check in on their behalf, perform
-//! partial early releases to a subset of beneficiaries while the will
-//! remains active, and optionally configure a vesting schedule so that the
-//! inheritance unlocks gradually instead of in a single lump sum.
+//! Two distribution modes are supported:
+//! - **Push mode** (default): `distribute` transfers tokens directly to each
+//!   beneficiary in a single call.
+//! - **Pull mode**: `distribute` stores each beneficiary's share as a
+//!   claimable amount. Beneficiaries call [`WillContract::claim_share`]
+//!   independently to withdraw their share.
+//! known to be incapacitated). Guardian votes expire after a configurable
+//! window so stale votes cannot combine with fresh ones.
+//!
+//! Grace periods may optionally be split into multiple tiers, each releasing
+//! a configurable percentage of the balance at a different time offset.
 
 mod errors;
 mod events;
@@ -192,6 +201,16 @@ impl WillContract {
             balances.set(token_addr, prev + amount);
         }
 
+        let effective_expiry = if guardian_vote_expiry_days == 0 {
+            grace_period_days
+        } else {
+            guardian_vote_expiry_days as u64
+        };
+
+        if !grace_tiers.is_empty() {
+            validate_grace_tiers(&env, &grace_tiers, grace_period_days);
+        }
+
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
 
@@ -203,11 +222,13 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
-        let vesting = vesting_duration_days.map(|days| VestingSchedule {
-            start_time: 0, // set when grace period expires
-            duration_seconds: days * SECONDS_PER_DAY,
-            released_amount: 0,
-        });
+        for guardian in guardians.iter() {
+            storage::set_guardian_consent(&env, will_id, &guardian, &GuardianConsent::Pending);
+        }
+
+        if let Some(ref fb) = fallback_beneficiary {
+            storage::set_fallback_beneficiary(&env, will_id, fb);
+        }
 
         let will = Will {
             id: will_id,
@@ -288,6 +309,28 @@ impl WillContract {
         }
     }
 
+    /// Batch check-in across multiple wills in a single transaction.
+    /// All wills must be owned by `owner` and in `Active` status.
+    /// Panics if any will ID is invalid, not owned by `owner`, or not `Active`.
+    pub fn batch_check_in(env: Env, will_ids: Vec<u64>, owner: Address) {
+        owner.require_auth();
+        let now = env.ledger().timestamp();
+        let count = will_ids.len();
+
+        for will_id in will_ids.iter() {
+            let mut will = load_owned(&env, will_id, &owner);
+            assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+            will.last_checkin = now;
+            let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+            storage::save_will(&env, &will);
+
+            events::check_in(&env, will_id, &owner, next_deadline);
+        }
+
+        events::batch_checkin(&env, &owner, &will_ids, count);
+    }
+
     /// Starts the grace period for `will_id` once the check-in deadline has
     /// passed. Callable by anyone: proving a missed deadline requires no
     /// special authorization, which lets any off-chain "keeper" trigger a
@@ -308,6 +351,8 @@ impl WillContract {
 
         will.status = WillStatus::Triggered;
         will.trigger_time = Some(now);
+        will.trigger_balance = will.balance;
+        will.released_basis_points = 0;
         let grace_period_ends = now + will.grace_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
@@ -384,6 +429,11 @@ impl WillContract {
     ///
     /// If no vesting schedule is configured, behaves exactly as before:
     /// full lump-sum release.
+    ///
+    /// In push mode (the default), tokens are transferred directly to each
+    /// beneficiary. In pull mode (`pull_distribution = true`), shares are
+    /// stored in claimable-shares storage and beneficiaries must call
+    /// `claim_share` to withdraw.
     ///
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
@@ -544,7 +594,8 @@ impl WillContract {
 
     /// Replaces the guardian list for `will_id`. Only possible while the will
     /// is `Active`. Any votes cast against the previous guardian list are
-    /// cleared so every updated list starts a fresh voting cycle.
+    /// cleared so every updated list starts a fresh voting cycle. Consent
+    /// entries for the old guardians are also cleared.
     ///
     /// Records the current timestamp as `guardian_list_updated_at` so that
     /// [`guardian_trigger`] enforces a cooldown before the new list takes
@@ -1406,4 +1457,29 @@ fn record_transition(
         action,
     };
     storage::append_history(env, will_id, &transition);
+}
+
+/// Releases `amount` from the will proportionally across beneficiaries and
+/// deducts it from `will.balance`. Does NOT change the will's status or
+/// persist it — the caller is responsible for saving.
+fn distribute_tier(env: &Env, will: &mut Will, amount: i128) {
+    let token_client = token::Client::new(env, &will.token);
+    let contract_address = env.current_contract_address();
+    let count = will.beneficiaries.len();
+
+    let mut remaining = amount;
+    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
+        let share = if index as u32 == count - 1 {
+            remaining
+        } else {
+            let portion = amount * (beneficiary.basis_points as i128) / 10_000;
+            remaining -= portion;
+            portion
+        };
+        if share > 0 {
+            token_client.transfer(&contract_address, &beneficiary.address, &share);
+        }
+    }
+
+    will.balance -= amount;
 }

@@ -78,6 +78,38 @@ pub struct ProtocolStats {
     pub total_locked_by_token: Vec<TokenLockedBalance>,
 }
 
+/// Consent status for a named guardian.
+///
+/// A guardian must explicitly accept before they can cast a `guardian_trigger`
+/// vote. The owner may also reject a guardian's acceptance.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuardianConsent {
+    /// Guardian has been named but has not yet responded.
+    Pending,
+    /// Guardian has accepted the role and may vote.
+    Accepted,
+    /// Guardian has declined the role.
+    Rejected,
+}
+
+/// A beneficiary's claimable share in a pull-based distribution.
+///
+/// Stored in persistent storage keyed by `(will_id, beneficiary_address)`.
+/// When the will enters `Released` status with `pull_distribution = true`,
+/// `distribute` computes each beneficiary's share and stores a `ClaimableShare`
+/// with `total` set to the share amount and `claimed` set to `0`. When the
+/// beneficiary calls `claim_share`, `claimed` is set to `total` and the tokens
+/// are transferred out of the contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimableShare {
+    /// The total amount the beneficiary is entitled to claim.
+    pub total: i128,
+    /// The amount already claimed (0 or `total`).
+    pub claimed: i128,
+}
+
 /// The full on-chain state of a single will.
 #[contracttype]
 #[derive(Clone, Debug)]
