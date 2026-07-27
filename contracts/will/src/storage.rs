@@ -49,6 +49,9 @@ pub(crate) enum DataKey {
     ArchivedWill(u64),
     /// Current contract schema version for migrations.
     SchemaVersion,
+    /// Global index of all wills currently in `Triggered` status,
+    /// used for efficient keeper/discovery queries.
+    TriggeredWills,
 }
 
 /// The data stored for each guardian vote: the Unix timestamp when the vote
@@ -220,6 +223,50 @@ pub fn get_owner_wills(env: &Env, owner: &Address) -> Vec<u64> {
 /// Returns the list of will ids `beneficiary` is named in.
 pub fn get_beneficiary_wills(env: &Env, beneficiary: &Address) -> Vec<u64> {
     let key = DataKey::BeneficiaryWills(beneficiary.clone());
+    env.storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Adds `will_id` to the global index of Triggered wills, if not already present.
+pub fn index_triggered_will(env: &Env, will_id: u64) {
+    let key = DataKey::TriggeredWills;
+    let mut ids: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !ids.contains(will_id) {
+        ids.push_back(will_id);
+        env.storage().persistent().set(&key, &ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+    }
+}
+
+/// Removes `will_id` from the global index of Triggered wills.
+///
+/// Called when a will transitions *away* from `Triggered` (e.g. via
+/// `emergency_checkin` or `release_inheritance`). Returns without writing
+/// when the id is not in the list, so the common case costs a read instead
+/// of a read plus a rewrite.
+pub fn unindex_triggered_will(env: &Env, will_id: u64) {
+    let key = DataKey::TriggeredWills;
+    let Some(mut ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
+        return;
+    };
+    let Some(index) = ids.first_index_of(will_id) else {
+        return;
+    };
+    ids.remove_unchecked(index);
+    env.storage().persistent().set(&key, &ids);
+}
+
+/// Returns the full list of will ids currently in `Triggered` status.
+pub fn get_triggered_wills(env: &Env) -> Vec<u64> {
+    let key = DataKey::TriggeredWills;
     env.storage()
         .persistent()
         .get(&key)
