@@ -10,6 +10,7 @@
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
+use crate::types::{Guardian, Will};
 use crate::types::{ProtocolStats, TokenLockedBalance, Will};
 use crate::types::{Will, WillStatus};
 
@@ -227,6 +228,9 @@ pub fn set_guardian_voted(env: &Env, will_id: u64, guardian: &Address) {
 ///
 /// Called whenever a will returns to `Active` (e.g. via `emergency_checkin`)
 /// so that guardians can vote again in a subsequent incapacitation event.
+pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Guardian>) {
+    for guardian in guardians.iter() {
+        let key = DataKey::GuardianVote(will_id, guardian.address.clone());
 ///
 /// `will.guardian_votes` is incremented in lockstep with every
 /// [`set_guardian_voted`] and zeroed alongside every reset, so a zero count
