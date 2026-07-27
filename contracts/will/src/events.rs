@@ -113,6 +113,17 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far:
     );
 }
 
+/// Published when two wills are merged into one.
+pub fn wills_merged(
+    env: &Env,
+    surviving_will_id: u64,
+    consumed_will_id: u64,
+    owner: &Address,
+    new_balance: i128,
+) {
+    env.events().publish(
+        (symbol_short!("merged"), surviving_will_id),
+        (owner.clone(), consumed_will_id, new_balance),
 /// Published when a will is migrated to a new schema version.
 pub fn will_migrated(env: &Env, will_id: u64, owner: &Address, from_version: u32, to_version: u32) {
     env.events().publish(

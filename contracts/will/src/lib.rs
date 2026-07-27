@@ -599,6 +599,111 @@ impl WillContract {
         storage::save_will(&env, &will);
         events::will_migrated(&env, will_id, &owner, old_version, CURRENT_SCHEMA_VERSION);
     }
+
+    /// Merges two active wills owned by the same address into a single will.
+    /// 
+    /// The merge policy is:
+    /// - The surviving will (will_id_a) receives the combined balance.
+    /// - Beneficiaries from both wills are merged, with percentages recalculated
+    ///   proportionally based on the combined balance. If a beneficiary appears
+    ///   in both wills, their percentages are summed first, then recalculated.
+    /// - Guardians from both wills are combined into a single list (up to MAX_GUARDIANS).
+    /// - Check-in period: use the minimum (most conservative).
+    /// - Grace period: use the maximum (most conservative).
+    /// - The consumed will (will_id_b) is marked as Cancelled with zero balance.
+    ///
+    /// # Parameters
+    /// - `owner`: the owner of both wills; must authorize this call.
+    /// - `will_id_a`: the will that survives and receives the merged state.
+    /// - `will_id_b`: the will that is consumed (marked Cancelled).
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own both wills.
+    /// - [`WillError::WillNotBothActive`] if either will is not in `Active` status.
+    /// - [`WillError::SameWillId`] if `will_id_a` equals `will_id_b`.
+    /// - [`WillError::MergeWouldExceedLimits`] if merging would exceed MAX_BENEFICIARIES or MAX_GUARDIANS limits.
+    /// - [`WillError::InvalidPercentages`] if recalculating percentages fails.
+    pub fn merge_wills(
+        env: Env,
+        owner: Address,
+        will_id_a: u64,
+        will_id_b: u64,
+    ) {
+        owner.require_auth();
+
+        if will_id_a == will_id_b {
+            panic_with_error!(&env, WillError::SameWillId);
+        }
+
+        let mut will_a = load_owned(&env, will_id_a, &owner);
+        let mut will_b = load_owned(&env, will_id_b, &owner);
+
+        assert_status(&env, &will_a, WillStatus::Active, WillError::WillNotBothActive);
+        assert_status(&env, &will_b, WillStatus::Active, WillError::WillNotBothActive);
+
+        // Merge beneficiaries with proportional recalculation
+        let merged_beneficiaries = merge_beneficiaries(&env, &will_a, &will_b);
+
+        if merged_beneficiaries.len() > MAX_BENEFICIARIES {
+            panic_with_error!(&env, WillError::MergeWouldExceedLimits);
+        }
+
+        // Merge guardians (unique)
+        let mut merged_guardians = will_a.guardians.clone();
+        for guardian in will_b.guardians.iter() {
+            if !merged_guardians.contains(&guardian) {
+                merged_guardians.push_back(guardian);
+            }
+        }
+
+        if merged_guardians.len() > MAX_GUARDIANS {
+            panic_with_error!(&env, WillError::MergeWouldExceedLimits);
+        }
+
+        // Merge parameters: use minimum check-in period, maximum grace period
+        let merged_checkin_period = if will_a.checkin_period_days < will_b.checkin_period_days {
+            will_a.checkin_period_days
+        } else {
+            will_b.checkin_period_days
+        };
+
+        let merged_grace_period = if will_a.grace_period_days > will_b.grace_period_days {
+            will_a.grace_period_days
+        } else {
+            will_b.grace_period_days
+        };
+
+        // Combine balances
+        let combined_balance = will_a.balance + will_b.balance;
+
+        // Update will_a with merged state
+        will_a.beneficiaries = merged_beneficiaries;
+        will_a.guardians = merged_guardians;
+        will_a.checkin_period_days = merged_checkin_period;
+        will_a.grace_period_days = merged_grace_period;
+        will_a.balance = combined_balance;
+        will_a.guardian_votes = 0;
+
+        // Remove old beneficiary indexes for will_b
+        for beneficiary in will_b.beneficiaries.iter() {
+            storage::remove_beneficiary_index(&env, &beneficiary.address, will_id_b);
+        }
+
+        // Mark will_b as cancelled with zero balance
+        will_b.balance = 0;
+        will_b.status = WillStatus::Cancelled;
+
+        // Save both wills
+        storage::save_will(&env, &will_a);
+        storage::save_will(&env, &will_b);
+
+        // Update beneficiary indexes for will_a
+        for beneficiary in will_a.beneficiaries.iter() {
+            storage::index_by_beneficiary(&env, &beneficiary.address, will_id_a);
+        }
+
+        events::wills_merged(&env, will_id_a, will_id_b, &owner, combined_balance);
+    }
 }
 
 /// Loads a will by id, panicking with [`WillError::WillNotFound`] if it does not exist.
@@ -793,4 +898,68 @@ fn distribute(env: &Env, will: &mut Will) {
     storage::save_will(env, will);
 
     events::inheritance_released(env, will.id, token_count, count);
+}
+
+/// Merges beneficiaries from two wills, recalculating percentages proportionally
+/// based on the combined balance. If a beneficiary appears in both wills, their
+/// percentages are summed before recalculation.
+fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficiary> {
+    let total_balance = will_a.balance + will_b.balance;
+    let mut beneficiary_shares: Vec<(Address, i128)> = Vec::new(env);
+
+    // Add beneficiaries from will_a with proportional balance
+    for beneficiary in will_a.beneficiaries.iter() {
+        let share = (will_a.balance as i128) * (beneficiary.percentage as i128) / 100;
+        beneficiary_shares.push_back((beneficiary.address.clone(), share));
+    }
+
+    // Merge beneficiaries from will_b, combining shares if they already exist
+    for beneficiary_b in will_b.beneficiaries.iter() {
+        let share_b = (will_b.balance as i128) * (beneficiary_b.percentage as i128) / 100;
+        let mut found = false;
+        let mut updated_shares: Vec<(Address, i128)> = Vec::new(env);
+        for (addr, share) in beneficiary_shares.iter() {
+            if addr == beneficiary_b.address {
+                updated_shares.push_back((addr, share + share_b));
+                found = true;
+            } else {
+                updated_shares.push_back((addr, share));
+            }
+        }
+        if found {
+            beneficiary_shares = updated_shares;
+        } else {
+            beneficiary_shares.push_back((beneficiary_b.address.clone(), share_b));
+        }
+    }
+
+    // Recalculate percentages from combined shares
+    let mut merged_beneficiaries: Vec<Beneficiary> = Vec::new(env);
+    let mut total_percentage: u32 = 0;
+
+    for (addr, share) in beneficiary_shares.iter() {
+        let percentage = if total_balance > 0 {
+            ((share * 100) / total_balance) as u32
+        } else {
+            0
+        };
+        if percentage > 0 {
+            merged_beneficiaries.push_back(Beneficiary {
+                address: addr,
+                percentage,
+            });
+            total_percentage += percentage;
+        }
+    }
+
+    // Handle rounding: assign remainder to the last beneficiary
+    if total_percentage < 100 && merged_beneficiaries.len() > 0 {
+        let remainder = 100 - total_percentage;
+        let last_index = merged_beneficiaries.len() - 1;
+        let mut last_beneficiary = merged_beneficiaries.get(last_index).unwrap();
+        last_beneficiary.percentage += remainder;
+        merged_beneficiaries.set(last_index, last_beneficiary);
+    }
+
+    merged_beneficiaries
 }
