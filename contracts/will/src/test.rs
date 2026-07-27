@@ -1,4 +1,4 @@
-#![cfg(test)]
+                                                                                                                                                                                                                                                                                                                                         #![cfg(test)]
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -74,6 +74,35 @@ fn setup_two_tokens<'a>() -> (
     (env, client, owner, token_a_client, token_a_addr, token_b_client, token_b_addr)
 }
 
+/// Sets up a will contract and funds the owner with native XLM by
+/// transferring from the test environment's source account (which has
+/// a large native XLM balance in test mode).
+fn setup_native<'a>() -> (
+    Env,
+    WillContractClient<'a>,
+    Address, // owner
+) {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+
+    // Capture the test source address *before* registering our contract.
+    // In the test environment, env.current_contract_address() returns the
+    // default source/invoker account which holds a large native XLM balance.
+    let test_source = env.current_contract_address();
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    // Transfer native XLM from the test source account to the owner,
+    // giving the owner XLM to use in the will.
+    env.transfer(&test_source, &owner, &10_000_000_000_000i128);
+
+    (env, client, owner)
+}
+
 fn advance_time(env: &Env, seconds: u64) {
     env.ledger().with_mut(|l| {
         l.timestamp += seconds;
@@ -82,6 +111,7 @@ fn advance_time(env: &Env, seconds: u64) {
 
 const DAY: u64 = 86_400;
 
+// ── Token-based (SAC) tests ────────────────────────────────────────────
 // ── existing tests updated for multi-token API ────────────────────────────────
 
 #[test]
@@ -105,6 +135,7 @@ fn test_create_will_success() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     assert_eq!(will_id, 1);
@@ -114,6 +145,7 @@ fn test_create_will_success() {
     assert_eq!(will.status, WillStatus::Active);
     assert_eq!(will.checkin_period_days, 90);
     assert_eq!(will.grace_period_days, 7);
+    assert!(!will.is_native);
     assert_eq!(token.balance(&owner), 1_000_000_000 - 1_000_000);
     assert_eq!(token.balance(&client.address), 1_000_000);
 }
@@ -139,6 +171,7 @@ fn test_checkin_resets_deadline() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 10 * DAY);
@@ -170,6 +203,7 @@ fn test_trigger_after_missed_checkin() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 91 * DAY);
@@ -202,6 +236,7 @@ fn test_cannot_trigger_before_deadline() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 10 * DAY);
@@ -229,6 +264,7 @@ fn test_emergency_checkin_cancels_trigger() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 91 * DAY);
@@ -267,6 +303,7 @@ fn test_release_inheritance_splits_correctly() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 91 * DAY);
@@ -305,6 +342,7 @@ fn test_cannot_release_during_grace_period() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 91 * DAY);
@@ -334,6 +372,7 @@ fn test_cancel_will_refunds_owner() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     client.cancel_will(&will_id, &owner);
@@ -367,6 +406,7 @@ fn test_update_beneficiaries() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     client.update_beneficiaries(
@@ -418,6 +458,7 @@ fn test_update_guardians() {
         &90,
         &7,
         &vec![&env, old_guardian],
+        &false,
     );
 
     client.update_guardians(
@@ -454,6 +495,7 @@ fn test_update_guardians_rejects_non_owner() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     client.update_guardians(&will_id, &non_owner, &vec![&env]);
@@ -481,6 +523,7 @@ fn test_update_guardians_rejects_too_many_guardians() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     client.update_guardians(
@@ -519,6 +562,7 @@ fn test_update_guardians_resets_votes_and_voted_flags() {
         &90,
         &7,
         &vec![&env, guardian_1.clone(), guardian_2.clone()],
+        &false,
     );
 
     client.guardian_trigger(&will_id, &guardian_1);
@@ -557,6 +601,7 @@ fn test_update_guardians_rejected_while_triggered() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     advance_time(&env, 91 * DAY);
@@ -587,6 +632,7 @@ fn test_update_guardians_rejected_while_released() {
         &90,
         &7,
         &vec![&env, guardian_1.clone(), guardian_2.clone()],
+        &false,
     );
 
     client.guardian_trigger(&will_id, &guardian_1);
@@ -615,6 +661,7 @@ fn test_update_guardians_rejected_while_cancelled() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     client.cancel_will(&will_id, &owner);
@@ -667,6 +714,7 @@ fn test_top_up_emits_event() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     client.top_up(&will_id, &owner, &token_address, &500_000);
@@ -715,6 +763,13 @@ fn test_guardian_trigger_requires_two_votes() {
         ],
         &90,
         &7,
+        &vec![
+            &env,
+            guardian_1.clone(),
+            guardian_2.clone(),
+            guardian_3.clone(),
+        ],
+        &false,
         &vec![&env, guardian_1.clone(), guardian_2.clone(), guardian_3.clone()],
     );
 
@@ -756,6 +811,7 @@ fn test_invalid_percentages_rejected() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 }
 
@@ -780,6 +836,7 @@ fn test_get_wills_by_owner() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
     client.create_will(
         &owner,
@@ -797,6 +854,7 @@ fn test_get_wills_by_owner() {
         &30,
         &3,
         &vec![&env],
+        &false,
     );
 
     let wills = client.get_wills_by_owner(&owner);
@@ -824,6 +882,7 @@ fn test_get_wills_by_beneficiary() {
         &90,
         &7,
         &vec![&env],
+        &false,
     );
 
     let wills = client.get_wills_by_beneficiary(&beneficiary);
@@ -831,6 +890,89 @@ fn test_get_wills_by_beneficiary() {
     assert_eq!(wills.get(0).unwrap().id, will_id);
 }
 
+// ── Native XLM tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_native_create_will_success() {
+    let (env, client, owner) = setup_native();
+    let beneficiary = Address::generate(&env);
+
+    let owner_initial = env.balance(&owner);
+
+    let will_id = client.create_will(
+        &owner,
+        &owner, // token address is unused for native, pass owner as placeholder
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &true,
+    );
+
+    assert_eq!(will_id, 1);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.owner, owner);
+    assert_eq!(will.balance, 1_000_000_000);
+    assert_eq!(will.status, WillStatus::Active);
+    assert!(will.is_native);
+    assert_eq!(will.checkin_period_days, 90);
+    assert_eq!(will.grace_period_days, 7);
+
+    // Owner should have lost the amount, contract gained it
+    assert_eq!(env.balance(&owner), owner_initial - 1_000_000_000);
+    assert_eq!(env.balance(&client.address), 1_000_000_000);
+}
+
+#[test]
+fn test_native_checkin_resets_deadline() {
+    let (env, client, owner) = setup_native();
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: Address::generate(&env),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &true,
+    );
+
+    advance_time(&env, 10 * DAY);
+    client.check_in(&will_id, &owner);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.last_checkin, 1_700_000_000 + 10 * DAY);
+    assert_eq!(will.status, WillStatus::Active);
+}
+
+#[test]
+fn test_native_trigger_and_release() {
+    let (env, client, owner) = setup_native();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                percentage: 100,
 // ── new multi-token tests ─────────────────────────────────────────────────────
 
 #[test]
@@ -887,6 +1029,7 @@ fn test_fractional_three_way_split() {
         &90,
         &7,
         &vec![&env],
+        &true,
     );
 
     let will = client.get_will(&will_id);
@@ -914,6 +1057,16 @@ fn test_top_up_new_token_adds_to_map() {
         &vec![&env, Beneficiary { address: beneficiary.clone(), percentage: 100 }],
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Triggered);
+
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    // Beneficiary should have received the full balance
+    assert_eq!(env.balance(&beneficiary), 1_000_000_000);
+    assert_eq!(env.balance(&client.address), 0);
     advance_time(&env, 8 * DAY);
     client.release_inheritance(&will_id);
 
@@ -928,6 +1081,9 @@ fn test_top_up_new_token_adds_to_map() {
     assert_eq!(will.balance, 0);
 }
 
+#[test]
+fn test_native_release_splits_multiple_beneficiaries() {
+    let (env, client, owner) = setup_native();
 /// Extreme split: 1 bp for A, 9_999 bp for B.
 /// On a balance of 1_000_000:
 ///   A = 1_000_000 * 1 / 10_000 = 100
@@ -940,12 +1096,19 @@ fn test_fractional_extreme_one_bp_split() {
 
     let will_id = client.create_will(
         &owner,
+        &owner,
+        &1_000_000_000,
         &token_address,
         &1_000_000,
         &vec![
             &env,
             Beneficiary {
                 address: beneficiary_a.clone(),
+                percentage: 60,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                percentage: 40,
                 basis_points: 1,
             },
             Beneficiary {
@@ -956,6 +1119,7 @@ fn test_fractional_extreme_one_bp_split() {
         &90,
         &7,
         &vec![&env],
+        &true,
     );
 
     // Top up with a brand-new token_b — it should appear as a new map entry.
@@ -985,6 +1149,62 @@ fn test_top_up_existing_token_accumulates() {
     advance_time(&env, 8 * DAY);
     client.release_inheritance(&will_id);
 
+    assert_eq!(env.balance(&beneficiary_a), 600_000_000);
+    assert_eq!(env.balance(&beneficiary_b), 400_000_000);
+    assert_eq!(env.balance(&client.address), 0);
+}
+
+#[test]
+fn test_native_emergency_checkin() {
+    let (env, client, owner) = setup_native();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &true,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    advance_time(&env, 2 * DAY);
+    client.emergency_checkin(&will_id, &owner);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Active);
+    assert!(will.trigger_time.is_none());
+    assert_eq!(will.last_checkin, 1_700_000_000 + 91 * DAY + 2 * DAY);
+    // Balance should still be in the contract
+    assert_eq!(env.balance(&client.address), 1_000_000_000);
+}
+
+#[test]
+fn test_native_cancel_will() {
+    let (env, client, owner) = setup_native();
+    let owner_initial = env.balance(&owner);
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
     assert_eq!(token.balance(&beneficiary_a), 100);
     assert_eq!(token.balance(&beneficiary_b), 999_900);
     assert_eq!(token.balance(&client.address), 0);
@@ -1016,6 +1236,37 @@ fn test_basis_points_over_10000_rejected() {
         &90,
         &7,
         &vec![&env],
+        &true,
+    );
+
+    // Contract should have the native XLM
+    assert_eq!(env.balance(&client.address), 1_000_000_000);
+
+    client.cancel_will(&will_id, &owner);
+
+    // Owner should be fully refunded
+    assert_eq!(env.balance(&owner), owner_initial);
+    assert_eq!(env.balance(&client.address), 0);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Cancelled);
+    assert_eq!(will.balance, 0);
+}
+
+#[test]
+fn test_native_top_up() {
+    let (env, client, owner) = setup_native();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &500_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                percentage: 100,
     );
 
     client.top_up(&will_id, &owner, &token_a_addr, &250_000);
@@ -1068,8 +1319,17 @@ fn test_basis_points_under_10000_rejected() {
         &90,
         &7,
         &vec![&env],
+        &true,
     );
 
+    let owner_before_topup = env.balance(&owner);
+    client.top_up(&will_id, &owner, &300_000_000);
+
+    assert_eq!(env.balance(&owner), owner_before_topup - 300_000_000);
+    assert_eq!(env.balance(&client.address), 800_000_000);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.balance, 800_000_000);
     client.cancel_will(&will_id, &owner);
 
     // Full balances must be returned to the owner.
@@ -1104,32 +1364,57 @@ fn test_release_inheritance_distributes_all_tokens_proportionally() {
             Beneficiary { address: beneficiary_b.clone(), percentage: 40 },
 }
 
-/// update_beneficiaries must also enforce the 10_000 bp invariant on the
-/// replacement list, and fractional splits set via that path must distribute
-/// correctly when inheritance is released.
-///
-/// Updated split: A = 2_500 bp (25 %), B = 7_500 bp (75 %).
-/// On a balance of 1_000_000: A = 250_000, B = 750_000.
 #[test]
-fn test_update_beneficiaries_fractional_split() {
-    let (env, client, owner, token, token_address) = setup();
-    let beneficiary_a = Address::generate(&env);
-    let beneficiary_b = Address::generate(&env);
-    let beneficiary_orig = Address::generate(&env);
+fn test_native_guardian_trigger() {
+    let (env, client, owner) = setup_native();
+    let beneficiary = Address::generate(&env);
+    let guardian_a = Address::generate(&env);
+    let guardian_b = Address::generate(&env);
 
     let will_id = client.create_will(
         &owner,
-        &token_address,
-        &1_000_000,
+        &owner,
+        &1_000_000_000,
         &vec![
             &env,
             Beneficiary {
-                address: beneficiary_orig,
-                basis_points: 10_000,
+                address: beneficiary.clone(),
+                percentage: 100,
             },
         ],
         &90,
         &7,
+        &vec![&env, guardian_a.clone(), guardian_b.clone()],
+        &true,
+    );
+
+    // First vote should not trigger release
+    client.guardian_trigger(&will_id, &guardian_a);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Active);
+    assert_eq!(will.guardian_votes, 1);
+    assert_eq!(env.balance(&beneficiary), 0);
+
+    // Second vote should release
+    client.guardian_trigger(&will_id, &guardian_b);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
+    assert_eq!(env.balance(&beneficiary), 1_000_000_000);
+    assert_eq!(env.balance(&client.address), 0);
+}
+
+#[test]
+fn test_native_rounding_remainder() {
+    let (env, client, owner) = setup_native();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let beneficiary_c = Address::generate(&env);
+
+    // Amount that does not split evenly among 3 beneficiaries (10+33+57=100 -> 10/100, 33/100, 57/100)
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &100, // 100 XLM
         &vec![&env],
     );
 
@@ -1183,6 +1468,21 @@ fn test_release_inheritance_rounding_remainder_goes_to_last_beneficiary() {
             &env,
             Beneficiary {
                 address: beneficiary_a.clone(),
+                percentage: 10,
+            },
+            Beneficiary {
+                address: beneficiary_b.clone(),
+                percentage: 33,
+            },
+            Beneficiary {
+                address: beneficiary_c.clone(),
+                percentage: 57,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &true,
                 basis_points: 2_500,
             },
             Beneficiary {
@@ -1197,6 +1497,15 @@ fn test_release_inheritance_rounding_remainder_goes_to_last_beneficiary() {
     advance_time(&env, 8 * DAY);
     client.release_inheritance(&will_id);
 
+    // Expected: 10% of 100 = 10, 33% of 100 = 33, remainder = 100 - 10 - 33 = 57
+    assert_eq!(env.balance(&beneficiary_a), 10);
+    assert_eq!(env.balance(&beneficiary_b), 33);
+    assert_eq!(env.balance(&beneficiary_c), 57);
+    assert_eq!(env.balance(&client.address), 0);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
+    assert_eq!(will.balance, 0);
     let share1 = token_a.balance(&b1); // floor(1_000_001 * 33 / 100) = 330_000
     let share2 = token_a.balance(&b2); // 330_000
     let share3 = token_a.balance(&b3); // remainder = 1_000_001 - 330_000 - 330_000 = 340_001
@@ -1248,6 +1557,18 @@ fn test_guardian_trigger_distributes_all_tokens() {
 
 #[test]
 #[should_panic]
+fn test_native_cannot_trigger_before_deadline() {
+    let (env, client, owner) = setup_native();
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: Address::generate(&env),
+                percentage: 100,
 fn test_create_will_zero_amount_rejected() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
@@ -1285,6 +1606,42 @@ fn test_update_beneficiaries_rejects_invalid_basis_points() {
         &90,
         &7,
         &vec![&env],
+        &true,
+    );
+
+    advance_time(&env, 10 * DAY);
+    client.trigger_will(&will_id);
+}
+
+#[test]
+#[should_panic]
+fn test_native_cannot_release_during_grace_period() {
+    let (env, client, owner) = setup_native();
+
+    let will_id = client.create_will(
+        &owner,
+        &owner,
+        &1_000_000_000,
+        &vec![
+            &env,
+            Beneficiary {
+                address: Address::generate(&env),
+                percentage: 100,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &true,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 2 * DAY);
+    // Grace period is 7 days, so 2 days is still within it
+    client.release_inheritance(&will_id);
+}
+
     );
 }
 

@@ -101,6 +101,9 @@ impl WillContract {
     /// - `checkin_period_days`: how many days the owner may go without checking in.
     /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
     /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
+    /// - `is_native`: whether the asset is native XLM. When `true`, transfers use
+    ///   `env.transfer()` instead of the token client; the `token` address is still
+    ///   stored but the native path is used for all balance movements.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -128,6 +131,7 @@ impl WillContract {
         checkin_period_days: u64,
         grace_period_days: u64,
         guardians: Vec<Address>,
+        is_native: bool,
     ) -> u64 {
         owner.require_auth();
 
@@ -163,6 +167,8 @@ impl WillContract {
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
 
+        transfer_funds(&env, is_native, &token, &owner, &env.current_contract_address(), &amount);
+
         let beneficiaries_count = beneficiaries.len();
         let token_count = balances.len();
         for beneficiary in beneficiaries.iter() {
@@ -172,6 +178,9 @@ impl WillContract {
         let will = Will {
             id: will_id,
             owner: owner.clone(),
+            token,
+            is_native,
+            balance: amount,
             balances,
             beneficiaries,
             checkin_period_days,
@@ -317,6 +326,15 @@ impl WillContract {
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
+        let refund = will.balance;
+        transfer_funds(
+            &env,
+            will.is_native,
+            &will.token,
+            &env.current_contract_address(),
+            &owner,
+            &refund,
+        );
         let contract_address = env.current_contract_address();
         let token_count = will.balances.len();
 
@@ -429,6 +447,10 @@ impl WillContract {
             panic_with_error!(&env, WillError::ZeroAmount);
         }
 
+        transfer_funds(
+            &env,
+            will.is_native,
+            &will.token,
         token::Client::new(&env, &token).transfer(
             &owner,
             &env.current_contract_address(),
@@ -577,6 +599,35 @@ fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     }
 }
 
+/// Transfers funds using either native XLM or token contract depending on
+/// `is_native`. When native, uses `env.transfer()`; otherwise uses the
+/// standard token client.
+fn transfer_funds(
+    env: &Env,
+    is_native: bool,
+    token_address: &Address,
+    from: &Address,
+    to: &Address,
+    amount: &i128,
+) {
+    if is_native {
+        env.transfer(from, to, amount);
+    } else {
+        token::Client::new(env, token_address).transfer(from, to, amount);
+    }
+}
+
+/// Returns the balance of `address` for the asset identified by the will.
+/// For native XLM this uses `env.balance()`, for token contracts it uses the
+/// token client's `balance` method.
+fn balance_of(env: &Env, is_native: bool, token_address: &Address, address: &Address) -> i128 {
+    if is_native {
+        env.balance(address)
+    } else {
+        token::Client::new(env, token_address).balance(address)
+    }
+}
+
 /// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
 /// repeated address.
 ///
@@ -656,7 +707,14 @@ fn distribute(env: &Env, will: &mut Will) {
             portion
         };
         if share > 0 {
-            token_client.transfer(&contract_address, &beneficiary.address, &share);
+            transfer_funds(
+                env,
+                will.is_native,
+                &will.token,
+                &contract_address,
+                &beneficiary.address,
+                &share,
+            );
         }
     }
 
