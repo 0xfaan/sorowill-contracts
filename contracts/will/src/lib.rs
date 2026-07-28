@@ -113,6 +113,9 @@ const BATCH_MAX: u32 = 10;
 /// before attempting something malicious.
 const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
 
+/// Maximum keeper bounty in basis points (100 bps = 1%).
+const MAX_KEEPER_BOUNTY_BPS: u32 = 100;
+
 #[contract]
 pub struct WillContract;
 
@@ -166,11 +169,17 @@ impl WillContract {
         beneficiaries: Vec<Beneficiary>,
         checkin_period_days: u64,
         grace_period_days: u64,
-        guardians: Vec<Guardian>,
         guardians: Vec<Address>,
-        is_native: bool,
+        keeper_bounty_bps: Option<u32>,
     ) -> u64 {
         owner.require_auth();
+
+        // Validate keeper bounty if provided
+        let keeper_bounty = match keeper_bounty_bps {
+            Some(bps) if bps <= MAX_KEEPER_BOUNTY_BPS => bps,
+            Some(_) => panic_with_error!(&env, WillError::KeeperBountyExceedsMax),
+            None => 0,
+        };
 
         if tokens.is_empty() || tokens.len() > MAX_TOKENS {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
@@ -249,6 +258,7 @@ impl WillContract {
             guardian_votes: 0,
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
+            keeper_bounty_bps: keeper_bounty,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -440,7 +450,7 @@ impl WillContract {
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
-    pub fn release_inheritance(env: Env, will_id: u64) {
+    pub fn release_inheritance(env: Env, will_id: u64, caller: Option<Address>) {
         let mut will = load_will(&env, will_id);
         assert_status(
             &env,
@@ -465,7 +475,7 @@ impl WillContract {
             symbol_short!("release"),
         );
 
-        distribute(&env, &mut will);
+        distribute(&env, &mut will, &caller);
     }
 
     /// Cancels the will and refunds every locked token balance to the owner.
@@ -598,6 +608,110 @@ impl WillContract {
         events::beneficiaries_updated(&env, will_id, &owner);
     }
 
+    /// Allows a beneficiary to renounce their inheritance share in advance.
+    /// The renouncing beneficiary is removed from the beneficiary list, and
+    /// their percentage is redistributed proportionally among the remaining
+    /// beneficiaries.
+    ///
+    /// Only callable by a named beneficiary while the will is in `Active` or
+    /// `Triggered` status. After renunciation, the will is saved but status
+    /// transitions are not recorded (it's a beneficiary action, not a status change).
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to renounce beneficiary status from
+    /// - `beneficiary`: the address renouncing their share; must authorize this call
+    ///   and must be named as a beneficiary in the will
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::BeneficiaryNotFound`] if `beneficiary` is not named in the will.
+    /// - [`WillError::WillNotActive`] if the will is not in `Active` or `Triggered` status.
+    /// - [`WillError::InvalidPercentages`] if redistribution would result in invalid
+    ///   percentages (shouldn't happen with a single beneficiary, but caught for safety).
+    pub fn renounce_beneficiary(env: Env, will_id: u64, beneficiary: Address) {
+        beneficiary.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        // Allow renunciation only in Active or Triggered status
+        if will.status != WillStatus::Active && will.status != WillStatus::Triggered {
+            panic_with_error!(&env, WillError::WillNotActive);
+        }
+
+        // Find and remove the renouncing beneficiary
+        let mut found_index: Option<usize> = None;
+        let mut renounced_basis_points: u32 = 0;
+        for (index, b) in will.beneficiaries.iter().enumerate() {
+            if b.address == beneficiary {
+                found_index = Some(index);
+                renounced_basis_points = b.basis_points;
+                break;
+            }
+        }
+
+        let index = match found_index {
+            Some(i) => i,
+            None => panic_with_error!(&env, WillError::BeneficiaryNotFound),
+        };
+
+        // Create new beneficiary list without the renouncing beneficiary
+        let mut new_beneficiaries: Vec<Beneficiary> = Vec::new(&env);
+        for (i, b) in will.beneficiaries.iter().enumerate() {
+            if i != index {
+                new_beneficiaries.push_back(b);
+            }
+        }
+
+        // If there are remaining beneficiaries, redistribute the renounced share
+        if !new_beneficiaries.is_empty() {
+            // Redistribute the renounced basis points proportionally to remaining beneficiaries
+            let remaining_basis_points: u32 = new_beneficiaries
+                .iter()
+                .map(|b| b.basis_points)
+                .fold(0u32, |acc, bp| acc.saturating_add(bp));
+
+            if remaining_basis_points > 0 {
+                let mut updated_beneficiaries: Vec<Beneficiary> = Vec::new(&env);
+                let mut total_redistributed: u32 = 0;
+
+                for (i, beneficiary_entry) in new_beneficiaries.iter().enumerate() {
+                    let share_of_renounced = if i as u32 == (new_beneficiaries.len() - 1) as u32 {
+                        // Last beneficiary gets any rounding remainder
+                        renounced_basis_points - total_redistributed
+                    } else {
+                        // Proportional share of the renounced percentage
+                        let portion = (renounced_basis_points as u128
+                            * beneficiary_entry.basis_points as u128)
+                            / remaining_basis_points as u128;
+                        total_redistributed = total_redistributed.saturating_add(portion as u32);
+                        portion as u32
+                    };
+
+                    updated_beneficiaries.push_back(Beneficiary {
+                        address: beneficiary_entry.address.clone(),
+                        basis_points: beneficiary_entry.basis_points.saturating_add(share_of_renounced),
+                    });
+                }
+
+                will.beneficiaries = updated_beneficiaries;
+            } else {
+                will.beneficiaries = new_beneficiaries;
+            }
+        } else {
+            // If this was the only beneficiary, the will now has no beneficiaries
+            // This is an edge case but we allow it (distribution would fail later)
+            will.beneficiaries = new_beneficiaries;
+        }
+
+        // Update indexes: remove the renouncing beneficiary from the reverse index
+        storage::remove_beneficiary_index(&env, &beneficiary, will_id);
+
+        // Get the owner for event emission (not changed)
+        let owner = will.owner.clone();
+        storage::save_will(&env, &will);
+
+        events::beneficiary_renounced(&env, will_id, &beneficiary, &owner);
+    }
+
     /// Replaces the guardian list for `will_id`. Only possible while the will
     /// is `Active`. Any votes cast against the previous guardian list are
     /// cleared so every updated list starts a fresh voting cycle. Consent
@@ -628,6 +742,160 @@ impl WillContract {
         storage::save_will(&env, &will);
 
         events::guardians_updated(&env, will_id, &owner);
+    }
+
+    /// Updates the check-in and/or grace period for an active will.
+    /// Only callable by the owner while the will is `Active`.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to update
+    /// - `owner`: the will's owner; must authorize this call
+    /// - `checkin_period_days`: new check-in period (optional); if specified,
+    ///   must be 1 to `MAX_PERIOD_DAYS`
+    /// - `grace_period_days`: new grace period (optional); if specified,
+    ///   must be 1 to `MAX_PERIOD_DAYS`
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::InvalidPeriod`] if either period is zero or exceeds
+    ///   [`MAX_PERIOD_DAYS`].
+    pub fn update_periods(
+        env: Env,
+        will_id: u64,
+        owner: Address,
+        checkin_period_days: Option<u64>,
+        grace_period_days: Option<u64>,
+    ) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        // Update checkin period if provided
+        if let Some(new_checkin) = checkin_period_days {
+            let valid = 1..=MAX_PERIOD_DAYS;
+            if !valid.contains(&new_checkin) {
+                panic_with_error!(&env, WillError::InvalidPeriod);
+            }
+            will.checkin_period_days = new_checkin;
+        }
+
+        // Update grace period if provided
+        if let Some(new_grace) = grace_period_days {
+            let valid = 1..=MAX_PERIOD_DAYS;
+            if !valid.contains(&new_grace) {
+                panic_with_error!(&env, WillError::InvalidPeriod);
+            }
+            will.grace_period_days = new_grace;
+        }
+
+        let now = env.ledger().timestamp();
+        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+        storage::save_will(&env, &will);
+
+        events::periods_updated(
+            &env,
+            will_id,
+            &owner,
+            will.checkin_period_days,
+            will.grace_period_days,
+            next_deadline,
+        );
+    }
+
+    /// Atomically updates multiple will settings (beneficiaries, guardians, and periods)
+    /// in a single transaction. Only callable by the owner while the will is `Active`.
+    ///
+    /// Any unspecified field (passed as `None`) is left unchanged. This allows callers
+    /// to update only the settings they need without specifying the others.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to update
+    /// - `owner`: the will's owner; must authorize this call
+    /// - `beneficiaries`: new beneficiary list (optional); if specified, must be valid
+    /// - `guardians`: new guardian list (optional); if specified, must be valid
+    /// - `checkin_period_days`: new check-in period (optional)
+    /// - `grace_period_days`: new grace period (optional)
+    ///
+    /// # Panics
+    /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - Any validation error from the specific update functions.
+    pub fn update_will_settings(
+        env: Env,
+        will_id: u64,
+        owner: Address,
+        beneficiaries: Option<Vec<Beneficiary>>,
+        guardians: Option<Vec<Address>>,
+        checkin_period_days: Option<u64>,
+        grace_period_days: Option<u64>,
+    ) {
+        owner.require_auth();
+        let mut will = load_owned(&env, will_id, &owner);
+        assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
+
+        let mut updated_fields: Vec<soroban_sdk::Symbol> = Vec::new(&env);
+
+        // Update beneficiaries if provided
+        if let Some(new_beneficiaries) = beneficiaries {
+            if new_beneficiaries.is_empty() || new_beneficiaries.len() > MAX_BENEFICIARIES {
+                panic_with_error!(&env, WillError::TooManyBeneficiaries);
+            }
+            assert_valid_percentages(&env, &new_beneficiaries);
+
+            // Update reverse indexes
+            for old in will.beneficiaries.iter() {
+                if !names_address(&new_beneficiaries, &old.address) {
+                    storage::remove_beneficiary_index(&env, &old.address, will_id);
+                }
+            }
+            for new_beneficiary in new_beneficiaries.iter() {
+                if !names_address(&will.beneficiaries, &new_beneficiary.address) {
+                    storage::index_by_beneficiary(&env, &new_beneficiary.address, will_id);
+                }
+            }
+
+            will.beneficiaries = new_beneficiaries;
+            updated_fields.push_back(symbol_short!("benef"));
+        }
+
+        // Update guardians if provided
+        if let Some(new_guardians) = guardians {
+            assert_valid_guardians(&env, &owner, &new_guardians);
+            let now = env.ledger().timestamp();
+            storage::reset_guardian_votes(&env, &will);
+            will.guardians = new_guardians;
+            will.guardian_votes = 0;
+            will.guardian_list_updated_at = now;
+            will.guardian_vote_weight = 0;
+            updated_fields.push_back(symbol_short!("guard"));
+        }
+
+        // Update checkin period if provided
+        if let Some(new_checkin) = checkin_period_days {
+            let valid = 1..=MAX_PERIOD_DAYS;
+            if !valid.contains(&new_checkin) {
+                panic_with_error!(&env, WillError::InvalidPeriod);
+            }
+            will.checkin_period_days = new_checkin;
+            updated_fields.push_back(symbol_short!("checkin"));
+        }
+
+        // Update grace period if provided
+        if let Some(new_grace) = grace_period_days {
+            let valid = 1..=MAX_PERIOD_DAYS;
+            if !valid.contains(&new_grace) {
+                panic_with_error!(&env, WillError::InvalidPeriod);
+            }
+            will.grace_period_days = new_grace;
+            updated_fields.push_back(symbol_short!("grace"));
+        }
+
+        // Save the will with all updates applied
+        storage::save_will(&env, &will);
+
+        // Emit consolidated event with the list of updated fields
+        events::will_settings_updated(&env, will_id, &owner, &updated_fields);
     }
 
     /// Adds `amount` of a specific `token` to an existing will's locked
@@ -822,7 +1090,7 @@ impl WillContract {
                 &guardian,
                 symbol_short!("gtrigr"),
             );
-            distribute(&env, &mut will);
+            distribute(&env, &mut will, &None);
         } else {
             storage::save_will(&env, &will);
         }
@@ -1364,12 +1632,19 @@ fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: 
 /// amounts are computed from the pre-mutation balances, then all state is
 /// committed (status, balances, indexes), and only then are the external
 /// token transfers executed.
-fn distribute(env: &Env, will: &mut Will) {
+fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     let contract_address = env.current_contract_address();
     let count = will.beneficiaries.len();
     let token_count = will.balances.len();
 
     // --- COMPUTE: calculate every share from the current (pre-mutation) balances ---
+    // Calculate keeper bounty if applicable (not paid to owner, only to other keepers)
+    let mut bounty_amount: i128 = 0;
+    let should_pay_bounty = keeper
+        .as_ref()
+        .map(|k| k != &will.owner && will.keeper_bounty_bps > 0)
+        .unwrap_or(false);
+
     // Build a Vec of (token_addr, Vec<(beneficiary_addr, share)>) so we can
     // commit all state before any external call fires.
     let mut transfer_plan: Vec<(Address, Vec<(Address, i128)>)> = Vec::new(env);
@@ -1378,6 +1653,12 @@ fn distribute(env: &Env, will: &mut Will) {
         if total == 0 {
             continue;
         }
+
+        // Calculate bounty from first token's balance if applicable
+        if should_pay_bounty && bounty_amount == 0 {
+            bounty_amount = (total * (will.keeper_bounty_bps as i128)) / 10_000;
+        }
+
         let mut shares: Vec<(Address, i128)> = Vec::new(env);
         let mut remaining = total;
         for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
@@ -1417,6 +1698,15 @@ fn distribute(env: &Env, will: &mut Will) {
             if share > 0 {
                 token_client.transfer(&contract_address, &beneficiary_addr, &share);
             }
+        }
+
+        // Pay keeper bounty from first token if applicable
+        if should_pay_bounty && bounty_amount > 0 {
+            if let Some(keeper_addr) = keeper {
+                token_client.transfer(&contract_address, keeper_addr, &bounty_amount);
+                events::keeper_bounty_paid(env, will.id, keeper_addr, bounty_amount);
+            }
+            bounty_amount = 0; // Only pay once
         }
     }
 

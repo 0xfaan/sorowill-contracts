@@ -164,3 +164,47 @@ pub fn will_archived(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("archived"), will_id), owner.clone());
 }
+
+/// Published when the owner updates the check-in or grace periods.
+pub fn periods_updated(
+    env: &Env,
+    will_id: u64,
+    owner: &Address,
+    new_checkin_period_days: u64,
+    new_grace_period_days: u64,
+    next_deadline: u64,
+) {
+    env.events().publish(
+        (symbol_short!("periodu"), will_id),
+        (
+            owner.clone(),
+            new_checkin_period_days,
+            new_grace_period_days,
+            next_deadline,
+        ),
+    );
+}
+
+/// Published when a beneficiary renounces their inheritance share.
+pub fn beneficiary_renounced(env: &Env, will_id: u64, beneficiary: &Address, owner: &Address) {
+    env.events().publish(
+        (symbol_short!("renounce"), will_id),
+        (beneficiary.clone(), owner.clone()),
+    );
+}
+
+/// Published when multiple will settings (beneficiaries, guardians, periods) are updated atomically.
+pub fn will_settings_updated(env: &Env, will_id: u64, owner: &Address, update_fields: &Vec<Symbol>) {
+    env.events().publish(
+        (symbol_short!("setupd"), will_id),
+        (owner.clone(), update_fields.clone()),
+    );
+}
+
+/// Published when a keeper bounty is paid for calling trigger_will or release_inheritance.
+pub fn keeper_bounty_paid(env: &Env, will_id: u64, keeper: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("bounty"), will_id),
+        (keeper.clone(), amount),
+    );
+}

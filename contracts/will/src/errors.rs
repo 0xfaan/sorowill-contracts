@@ -56,4 +56,8 @@ pub enum WillError {
     GuardianCooldownActive = 15,
     /// The owner cannot designate themselves as a guardian of their own will.
     OwnerCannotBeGuardian = 17,
+    /// A beneficiary is not found in the will's beneficiary list.
+    BeneficiaryNotFound = 18,
+    /// Keeper bounty basis points exceed the maximum allowed (100 bps/1%).
+    KeeperBountyExceedsMax = 19,
 }
