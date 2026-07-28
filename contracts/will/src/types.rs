@@ -150,14 +150,14 @@ pub struct Will {
     /// via a weight-based quorum using `guardian_trigger`.
     pub guardians: Vec<Guardian>,
     /// Accumulated weight of guardian votes cast in the current cycle.
-    /// Release triggers when this reaches `GUARDIAN_THRESHOLD`.
+    /// Release triggers when this reaches `guardian_threshold`.
     pub guardian_vote_weight: u32,
-    /// Optional guardian addresses (up to 3) who may force an early release
-    /// via a 2-of-N vote using `guardian_trigger`.
-    pub guardians: Vec<Address>,
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Number of distinct guardian votes required to force an early release.
+    /// Must be between 1 and `guardians.len()`.
+    pub guardian_threshold: u32,
     /// Unix timestamp (seconds) of the last guardian-list change.
     /// `guardian_trigger` is only effective after a cooldown period has
     /// elapsed since this timestamp, preventing a compromised owner from
@@ -170,6 +170,20 @@ pub struct Will {
     /// When set, a portion of the inheritance is paid to callers who trigger
     /// or release the will (not to the owner). Defaults to 0.
     pub keeper_bounty_bps: u32,
+}
+
+/// Reasons a guardian can provide when casting a trigger vote.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuardianVoteReason {
+    /// The owner is confirmed deceased.
+    Deceased = 0,
+    /// The owner is incapacitated and unable to check in.
+    Incapacitated = 1,
+    /// The owner cannot be reached or located.
+    Unreachable = 2,
+    /// Any other reason not covered by the above.
+    Other = 3,
 }
 
 /// A single entry in a will's on-chain audit trail, recording one status
