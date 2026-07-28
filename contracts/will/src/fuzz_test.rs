@@ -84,6 +84,7 @@ fn create_will_input_strategy() -> impl Strategy<Value = CreateWillInput> {
         prop::collection::vec(any::<u8>(), 0..6),
         period_strategy(),
         period_strategy(),
+        1u32..=5,
         any::<bool>(),
     )
         .prop_map(
@@ -94,6 +95,7 @@ fn create_will_input_strategy() -> impl Strategy<Value = CreateWillInput> {
                 guardian_slots,
                 checkin_period_days,
                 grace_period_days,
+                guardian_threshold,
                 release_after_create,
             )| CreateWillInput {
                 mint,
@@ -102,6 +104,7 @@ fn create_will_input_strategy() -> impl Strategy<Value = CreateWillInput> {
                 guardian_slots,
                 checkin_period_days,
                 grace_period_days,
+                guardian_threshold,
                 release_after_create,
             },
         )
@@ -205,7 +208,7 @@ fn create_will_rejects_overflowing_basis_points() {
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
 
     assert_eq!(
-        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env]),
+        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None),
         Err(Ok(WillError::InvalidPercentages.into()))
     );
 }
@@ -218,7 +221,7 @@ fn create_will_rejects_non_10000_basis_points() {
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
 
     assert_eq!(
-        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env]),
+        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None),
         Err(Ok(WillError::InvalidPercentages.into()))
     );
 }
@@ -239,7 +242,9 @@ fn create_will_rejects_overflowing_checkin_period() {
             &beneficiaries,
             &overflowing,
             &7,
-            &vec![&env]
+            &vec![&env],
+            &2,
+            &None,
         ),
         Err(Ok(WillError::InvalidPeriod.into()))
     );
@@ -260,7 +265,9 @@ fn create_will_rejects_overflowing_grace_period() {
             &beneficiaries,
             &90,
             &u64::MAX,
-            &vec![&env]
+            &vec![&env],
+            &2,
+            &None,
         ),
         Err(Ok(WillError::InvalidPeriod.into()))
     );
@@ -275,11 +282,11 @@ fn create_will_rejects_zero_length_periods() {
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
 
     assert_eq!(
-        client.try_create_will(&owner, &tokens, &beneficiaries, &0, &7, &vec![&env]),
+        client.try_create_will(&owner, &tokens, &beneficiaries, &0, &7, &vec![&env], &2, &None),
         Err(Ok(WillError::InvalidPeriod.into()))
     );
     assert_eq!(
-        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &0, &vec![&env]),
+        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &0, &vec![&env], &2, &None),
         Err(Ok(WillError::InvalidPeriod.into()))
     );
 }
@@ -298,6 +305,8 @@ fn create_will_accepts_maximum_periods() {
         &crate::MAX_PERIOD_DAYS,
         &crate::MAX_PERIOD_DAYS,
         &vec![&env],
+        &2,
+        &None,
     );
     assert_eq!(
         client.get_will(&will_id).checkin_period_days,
@@ -321,7 +330,9 @@ fn create_will_rejects_duplicate_guardians() {
             &beneficiaries,
             &90,
             &7,
-            &vec![&env, guardian.clone(), guardian]
+            &vec![&env, guardian.clone(), guardian],
+            &2,
+            &None,
         ),
         Err(Ok(WillError::DuplicateGuardian.into()))
     );
@@ -336,7 +347,7 @@ fn update_guardians_rejects_duplicate_guardians() {
     let guardian = Address::generate(&env);
 
     let will_id =
-        client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env]);
+        client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None);
 
     assert_eq!(
         client.try_update_guardians(&will_id, &owner, &vec![&env, guardian.clone(), guardian]),
@@ -359,6 +370,8 @@ fn update_beneficiaries_rejects_overflowing_basis_points() {
         &90,
         &7,
         &vec![&env],
+        &2,
+        &None,
     );
 
     let replacement = vec![

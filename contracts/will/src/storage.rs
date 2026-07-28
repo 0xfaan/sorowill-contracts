@@ -10,10 +10,7 @@
 use soroban_sdk::{contracttype, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::{Will, WillStatusTransition};
-use crate::types::{Guardian, Will};
-use crate::types::{ProtocolStats, TokenLockedBalance, Will};
-use crate::types::{Will, WillStatus};
+use crate::types::{Guardian, GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition};
 
 /// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
 /// is approximately 17,280 ledgers.
@@ -349,9 +346,6 @@ pub fn set_guardian_voted(
 ///
 /// Called whenever a will returns to `Active` (e.g. via `emergency_checkin`)
 /// so that guardians can vote again in a subsequent incapacitation event.
-pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Guardian>) {
-    for guardian in guardians.iter() {
-        let key = DataKey::GuardianVote(will_id, guardian.address.clone());
 ///
 /// `will.guardian_votes` is incremented in lockstep with every
 /// [`set_guardian_voted`] and zeroed alongside every reset, so a zero count
@@ -363,7 +357,7 @@ pub fn reset_guardian_votes(env: &Env, will: &Will) {
         return;
     }
     for guardian in will.guardians.iter() {
-        let key = DataKey::GuardianVote(will.id, guardian.clone());
+        let key = DataKey::GuardianVote(will.id, guardian.address.clone());
         env.storage().persistent().remove(&key);
     }
 }
@@ -449,6 +443,7 @@ pub fn archive_will(env: &Env, will: &Will) {
     for beneficiary in will.beneficiaries.iter() {
         remove_beneficiary_index(env, &beneficiary.address, will.id);
     }
+}
 
 /// Current contract schema version. Increment this whenever the Will struct
 /// or storage format changes, then implement migration logic in lib.rs.
