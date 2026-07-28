@@ -380,3 +380,60 @@ fn update_beneficiaries_rejects_overflowing_basis_points() {
     // The rejected update must not have disturbed the stored list.
     assert_eq!(client.get_will(&will_id).beneficiaries, beneficiaries);
 }
+
+/// The same address split across two beneficiary entries looks like a valid
+/// 100% allocation but the index only stores one entry per address, silently
+/// dropping one of the split percentages.
+#[test]
+fn create_will_rejects_duplicate_beneficiary_addresses() {
+    let (env, client, owner, token) = setup();
+    let beneficiary = Address::generate(&env);
+    let beneficiaries = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary.clone(),
+            basis_points: 5_000,
+        },
+        Beneficiary {
+            address: beneficiary,
+            basis_points: 5_000,
+        },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
+
+    assert_eq!(
+        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env]),
+        Err(Ok(WillError::DuplicateBeneficiary.into()))
+    );
+}
+
+/// `update_beneficiaries` shares the validation, so it must reject duplicate
+/// addresses in the replacement list too.
+#[test]
+fn update_beneficiaries_rejects_duplicate_beneficiary_addresses() {
+    let (env, client, owner, token) = setup();
+    let beneficiaries = single_beneficiary(&env, 10_000);
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
+
+    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env]);
+
+    let duplicate = Address::generate(&env);
+    let replacement = vec![
+        &env,
+        Beneficiary {
+            address: duplicate.clone(),
+            basis_points: 5_000,
+        },
+        Beneficiary {
+            address: duplicate,
+            basis_points: 5_000,
+        },
+    ];
+
+    assert_eq!(
+        client.try_update_beneficiaries(&will_id, &owner, &replacement),
+        Err(Ok(WillError::DuplicateBeneficiary.into()))
+    );
+    // The rejected update must not have disturbed the stored list.
+    assert_eq!(client.get_will(&will_id).beneficiaries, beneficiaries);
+}

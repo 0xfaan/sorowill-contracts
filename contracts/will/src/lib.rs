@@ -158,6 +158,7 @@ impl WillContract {
     /// - [`WillError::TooManyBeneficiaries`] if the beneficiary/guardian/token lists are
     ///   empty or exceed their respective caps.
     /// - [`WillError::InvalidPercentages`] if beneficiary basis points do not sum to 10,000.
+    /// - [`WillError::DuplicateBeneficiary`] if the same address is supplied twice.
     /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
     /// - [`WillError::InvalidPeriod`] if either period is zero or exceeds
     ///   [`MAX_PERIOD_DAYS`].
@@ -570,6 +571,7 @@ impl WillContract {
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if the new list is empty or too large.
     /// - [`WillError::InvalidPercentages`] if the new basis points do not sum to 10,000.
+    /// - [`WillError::DuplicateBeneficiary`] if the same address is supplied twice.
     pub fn update_beneficiaries(
         env: Env,
         will_id: u64,
@@ -1515,13 +1517,24 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
 ///
 /// Each beneficiary must have a non-zero basis point allocation; zero-percentage
 /// entries waste a slot in the beneficiary list and indicate a client-side error.
+///
+/// The same address may not appear more than once: the beneficiary index only
+/// stores one entry per address, so a repeated address silently drops one of
+/// the split percentages rather than actually splitting the share, which is
+/// almost certainly a client-side mistake rather than intentional.
 fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     let mut total: u32 = 0;
-    for beneficiary in beneficiaries.iter() {
+    for i in 0..beneficiaries.len() {
+        let beneficiary = beneficiaries.get_unchecked(i);
         if beneficiary.basis_points == 0 {
             panic_with_error!(env, WillError::InvalidPercentages);
         }
         total += beneficiary.basis_points;
+        for j in (i + 1)..beneficiaries.len() {
+            if beneficiary.address == beneficiaries.get_unchecked(j).address {
+                panic_with_error!(env, WillError::DuplicateBeneficiary);
+            }
+        }
     }
     if total != 10_000 {
         panic_with_error!(env, WillError::InvalidPercentages);
