@@ -356,6 +356,8 @@ impl WillContract {
         let grace_period_ends = now + will.grace_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
 
+        storage::index_triggered_will(&env, will_id);
+
         record_transition(
             &env,
             will_id,
@@ -401,10 +403,9 @@ impl WillContract {
         will.trigger_time = None;
         will.last_checkin = now;
         will.guardian_vote_weight = 0;
-        storage::reset_guardian_votes(&env, will_id, &will.guardians);
-        will.guardian_votes = 0;
-        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         storage::save_will(&env, &will);
+
+        storage::unindex_triggered_will(&env, will_id);
 
         record_transition(
             &env,
@@ -415,6 +416,7 @@ impl WillContract {
             symbol_short!("emerg"),
         );
 
+        let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
         events::emergency_checkin(&env, will_id, &owner, next_deadline);
     }
 
@@ -684,6 +686,16 @@ impl WillContract {
     /// Returns aggregate protocol statistics for all wills currently tracked on-chain.
     pub fn get_protocol_stats(env: Env) -> ProtocolStats {
         storage::get_protocol_stats(&env)
+    }
+
+    /// Returns the list of will ids currently in `Triggered` status.
+    ///
+    /// This is the on-chain index that lets keeper bots and monitoring tools
+    /// efficiently discover wills that are past their check-in deadline and
+    /// within their grace period, without having to replay every
+    /// `will_triggered` event off-chain.
+    pub fn get_triggered_wills(env: Env) -> Vec<u64> {
+        storage::get_triggered_wills(&env)
     }
 
     /// Returns the full state of every will owned by `owner`.
@@ -1369,6 +1381,7 @@ fn distribute(env: &Env, will: &mut Will) {
     will.balance = 0;
     will.balances = Map::new(env);
     will.status = WillStatus::Released;
+    storage::unindex_triggered_will(env, will.id);
     storage::save_will(env, will);
 
     events::inheritance_released(env, will.id, total, &breakdown, guardian_triggered);
