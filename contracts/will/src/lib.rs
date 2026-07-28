@@ -179,7 +179,7 @@ impl WillContract {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
         assert_valid_percentages(&env, &beneficiaries);
-        assert_valid_guardians(&env, &guardians);
+        assert_valid_guardians(&env, &owner, &guardians);
         assert_valid_periods(&env, checkin_period_days, grace_period_days);
 
         // Validate amounts and build the balances map.
@@ -612,14 +612,12 @@ impl WillContract {
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
     ///   guardians are supplied.
-    pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Guardian>) {
-    /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
     pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Address>) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
-        assert_valid_guardians(&env, &guardians);
+        assert_valid_guardians(&env, &owner, &guardians);
 
         let now = env.ledger().timestamp();
         storage::reset_guardian_votes(&env, &will);
@@ -983,7 +981,7 @@ impl WillContract {
                 panic_with_error!(&env, WillError::TooManyBeneficiaries);
             }
             assert_valid_percentages(&env, &beneficiaries);
-            assert_valid_guardians(&env, &guardians);
+            assert_valid_guardians(&env, &owner, &guardians);
             assert_valid_periods(&env, checkin_period_days, grace_period_days);
 
             let mut balances: Map<Address, i128> = Map::new(&env);
@@ -1240,15 +1238,21 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
         .any(|beneficiary| &beneficiary.address == address)
 }
 
-/// Asserts beneficiary basis points sum to exactly 10,000.
+/// Asserts beneficiary basis points sum to exactly 10,000 and no beneficiary has zero percentage.
 ///
 /// The per-entry upper bound is not enforced here (shares are `u32` and
 /// `MAX_BENEFICIARIES` is small enough that overflow is not a concern), but
 /// the exact-sum invariant is critical: it guarantees that every token
 /// balance is fully distributed with no dust left behind.
+///
+/// Each beneficiary must have a non-zero basis point allocation; zero-percentage
+/// entries waste a slot in the beneficiary list and indicate a client-side error.
 fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
     let mut total: u32 = 0;
     for beneficiary in beneficiaries.iter() {
+        if beneficiary.basis_points == 0 {
+            panic_with_error!(env, WillError::InvalidPercentages);
+        }
         total += beneficiary.basis_points;
     }
     if total != 10_000 {
@@ -1286,18 +1290,24 @@ fn balance_of(env: &Env, is_native: bool, token_address: &Address, address: &Add
 }
 
 /// Asserts a guardian list is no longer than [`MAX_GUARDIANS`] and contains no
-/// repeated address.
+/// repeated address. Also validates that the owner is not in the guardian list.
 ///
 /// Duplicates matter because [`WillContract::guardian_trigger`] counts each
 /// address at most once. A list such as `[g, g]` looks like a working 2-of-2
 /// quorum but can only ever reach a single vote, silently leaving the will with
 /// a guardian override that can never fire.
-fn assert_valid_guardians(env: &Env, guardians: &Vec<Address>) {
+///
+/// The owner cannot be a guardian since guardians are meant to act when the
+/// owner is incapacitated or known to be dead.
+fn assert_valid_guardians(env: &Env, owner: &Address, guardians: &Vec<Address>) {
     if guardians.len() > MAX_GUARDIANS {
         panic_with_error!(env, WillError::TooManyBeneficiaries);
     }
     for i in 0..guardians.len() {
         let guardian = guardians.get_unchecked(i);
+        if guardian == owner {
+            panic_with_error!(env, WillError::OwnerCannotBeGuardian);
+        }
         for j in (i + 1)..guardians.len() {
             if guardian == guardians.get_unchecked(j) {
                 panic_with_error!(env, WillError::DuplicateGuardian);
@@ -1319,6 +1329,27 @@ fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: 
     }
 }
 
+/// Distributes all token balances across `will.beneficiaries` proportionally
+/// to their basis-point shares, transfers the shares out of the contract,
+/// clears the balances map, marks the will `Released`, and publishes the
+/// `InheritanceReleased` event.
+///
+/// # Rounding Behavior
+///
+/// Each token's distribution is calculated as: `share = balance * (basis_points / 10_000)`.
+/// Integer division truncates toward zero, which may result in zero shares for
+/// beneficiaries with very small calculated amounts. For example, distributing 9 units
+/// equally among 10 beneficiaries (900 basis points each) gives each person 0.9 units,
+/// which truncates to 0.
+///
+/// To ensure no dust is left behind, any rounding remainder is paid to the final
+/// beneficiary in the list. This guarantees the full balance of every token is
+/// always distributed across beneficiaries.
+///
+/// **Note:** Callers should ensure that the will's balance is sufficient to give
+/// each beneficiary at least 1 unit of their share. Extremely small balances relative
+/// to beneficiary counts can result in most recipients getting zero after rounding.
+/// Consider validating a minimum will amount at creation time (see issue #37).
 /// Splits `will.balance` across `will.beneficiaries` proportionally to their
 /// percentages, transfers the shares out of the contract, marks the will
 /// `Released`, and publishes the `InheritanceReleased` event with a full

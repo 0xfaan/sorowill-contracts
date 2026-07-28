@@ -4851,6 +4851,255 @@ fn test_batch_checkin_emits_event() {
     assert!(found_batch, "batch checkin event not found");
 }
 
+// ── Issue #77: Duplicate Guardian Validation ──────────────────────────────────
+
+#[test]
+#[should_panic(expected = "DuplicateGuardian")]
+fn test_duplicate_guardians_rejected_in_create() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian.clone(), guardian.clone()],
+        &false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "DuplicateGuardian")]
+fn test_duplicate_guardians_rejected_in_update() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian_a = Address::generate(&env);
+    let guardian_b = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian_a],
+        &false,
+    );
+
+    client.update_guardians(&will_id, &owner, &vec![&env, guardian_b.clone(), guardian_b]);
+}
+
+// ── Issue #78: Owner Cannot Be Guardian ───────────────────────────────────────
+
+#[test]
+#[should_panic(expected = "OwnerCannotBeGuardian")]
+fn test_owner_cannot_be_guardian_in_create() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, owner.clone()],
+        &false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "OwnerCannotBeGuardian")]
+fn test_owner_cannot_be_guardian_in_update() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env, guardian],
+        &false,
+    );
+
+    client.update_guardians(&will_id, &owner, &vec![&env, owner.clone()]);
+}
+
+// ── Issue #79: Reject Zero-Percentage Beneficiaries ──────────────────────────
+
+#[test]
+#[should_panic(expected = "InvalidPercentages")]
+fn test_zero_percentage_beneficiary_rejected_in_create() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a,
+                basis_points: 10_000,
+            },
+            Beneficiary {
+                address: beneficiary_b,
+                basis_points: 0,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidPercentages")]
+fn test_zero_percentage_beneficiary_rejected_in_update() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &false,
+    );
+
+    client.update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a,
+                basis_points: 5_000,
+            },
+            Beneficiary {
+                address: beneficiary_b,
+                basis_points: 5_000,
+            },
+            Beneficiary {
+                address: Address::generate(&env),
+                basis_points: 0,
+            },
+        ],
+    );
+}
+
+// ── Issue #80: Rounding Behavior in Distribution ────────────────────────────
+
+#[test]
+fn test_rounding_with_small_balance_and_many_beneficiaries() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let beneficiary_c = Address::generate(&env);
+    let beneficiary_d = Address::generate(&env);
+    let beneficiary_e = Address::generate(&env);
+    let beneficiary_f = Address::generate(&env);
+    let beneficiary_g = Address::generate(&env);
+    let beneficiary_h = Address::generate(&env);
+    let beneficiary_i = Address::generate(&env);
+    let beneficiary_j = Address::generate(&env);
+
+    // Create a will with 9 base units distributed equally among 10 beneficiaries
+    // Each should get 0.9 units, which truncates to 0 for all but the last one
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 9_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary_a,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_b,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_c,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_d,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_e,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_f,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_g,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_h,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_i,
+                basis_points: 1_000,
+            },
+            Beneficiary {
+                address: beneficiary_j,
+                basis_points: 1_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &false,
+    );
+
+    // Trigger and release the will
 // ── Issue #69: remove_beneficiary_index must extend TTL ──────────────────────
 
 /// After removing a beneficiary from a will, the BeneficiaryWills index entry
@@ -5097,6 +5346,22 @@ fn test_release_inheritance_status_committed_before_transfer() {
     advance_time(&env, 8 * DAY);
     client.release_inheritance(&will_id);
 
+    // Verify that the last beneficiary received all the remainder
+    // (0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 9 due to rounding remainder)
+    assert_eq!(token.balance(&beneficiary_j), 9);
+    assert_eq!(token.balance(&beneficiary_a), 0);
+    assert_eq!(token.balance(&beneficiary_b), 0);
+    assert_eq!(token.balance(&beneficiary_c), 0);
+    assert_eq!(token.balance(&beneficiary_d), 0);
+    assert_eq!(token.balance(&beneficiary_e), 0);
+    assert_eq!(token.balance(&beneficiary_f), 0);
+    assert_eq!(token.balance(&beneficiary_g), 0);
+    assert_eq!(token.balance(&beneficiary_h), 0);
+    assert_eq!(token.balance(&beneficiary_i), 0);
+
+    // Verify will is now released
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
     let will = client.get_will(&will_id);
     assert_eq!(will.status, WillStatus::Released);
     assert_eq!(will.balances.len(), 0);

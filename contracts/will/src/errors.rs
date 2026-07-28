@@ -54,4 +54,6 @@ pub enum WillError {
     /// blocked until the cooldown period passes after the last guardian-list
     /// change.
     GuardianCooldownActive = 15,
+    /// The owner cannot designate themselves as a guardian of their own will.
+    OwnerCannotBeGuardian = 17,
 }
