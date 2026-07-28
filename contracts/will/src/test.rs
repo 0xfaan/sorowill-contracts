@@ -5456,3 +5456,39 @@ fn test_release_inheritance_status_committed_before_transfer() {
     assert_eq!(will.balances.len(), 0);
     assert_eq!(will.balance, 0);
 }
+
+// ── Issue #74: Reject zero-length check-in/grace periods ─────────────────────
+
+#[test]
+#[should_panic(expected = "InvalidPeriod")]
+fn test_create_will_zero_checkin_period_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary, basis_points: 10_000 }],
+        &0,
+        &7,
+        &vec![&env],
+        &None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidPeriod")]
+fn test_create_will_zero_grace_period_rejected() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary, basis_points: 10_000 }],
+        &90,
+        &0,
+        &vec![&env],
+        &None,
+    );
+}
