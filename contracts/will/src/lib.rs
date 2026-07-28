@@ -57,6 +57,11 @@ mod fuzz_test;
 #[cfg(test)]
 mod test;
 
+/// Malicious/reentrant SEP-41 token mock used for reentrancy regression
+/// testing. See the module docs for details.
+#[cfg(test)]
+mod test_support;
+
 use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Vec};
 
 pub use errors::WillError;
