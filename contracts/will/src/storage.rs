@@ -198,6 +198,10 @@ pub fn index_by_beneficiary(env: &Env, beneficiary: &Address, will_id: u64) {
 /// beneficiary is dropped from a will. Returns without writing when the id is
 /// not in the list, so an address that was never indexed costs a read instead
 /// of a read plus a pointless rewrite.
+///
+/// The TTL is refreshed after every write so that an index entry that is only
+/// ever pruned (never freshly added to) does not expire before the underlying
+/// wills do.
 pub fn remove_beneficiary_index(env: &Env, beneficiary: &Address, will_id: u64) {
     let key = DataKey::BeneficiaryWills(beneficiary.clone());
     let Some(mut ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
@@ -209,6 +213,32 @@ pub fn remove_beneficiary_index(env: &Env, beneficiary: &Address, will_id: u64) 
     // `first_index_of` just proved the index is in bounds.
     ids.remove_unchecked(index);
     env.storage().persistent().set(&key, &ids);
+    // Bump TTL so a beneficiary-index entry that is only ever pruned (never
+    // freshly added to) does not expire while its remaining will entries are
+    // still active.
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Removes `will_id` from the index of wills owned by `owner`.
+///
+/// Used by `distribute` and `cancel_will` to keep the owner index accurate
+/// after a will reaches a terminal state. Returns without writing when the id
+/// is not in the list.
+pub fn remove_owner_index(env: &Env, owner: &Address, will_id: u64) {
+    let key = DataKey::OwnerWills(owner.clone());
+    let Some(mut ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
+        return;
+    };
+    let Some(index) = ids.first_index_of(will_id) else {
+        return;
+    };
+    ids.remove_unchecked(index);
+    env.storage().persistent().set(&key, &ids);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
 
 /// Returns the list of will ids owned by `owner`.

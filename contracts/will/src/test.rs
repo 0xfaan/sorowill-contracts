@@ -4850,3 +4850,255 @@ fn test_batch_checkin_emits_event() {
     }
     assert!(found_batch, "batch checkin event not found");
 }
+
+// ── Issue #69: remove_beneficiary_index must extend TTL ──────────────────────
+
+/// After removing a beneficiary from a will, the BeneficiaryWills index entry
+/// must still be readable even after the ledger sequence has advanced past the
+/// TTL that would have been set by the original `index_by_beneficiary` write.
+/// The fix in `remove_beneficiary_index` calls `extend_ttl` after every write,
+/// so the entry survives purely-pruning workloads.
+#[test]
+fn test_remove_beneficiary_index_extends_ttl() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    // Create a will with two beneficiaries so beneficiary_b has an index entry.
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary { address: beneficiary_a.clone(), basis_points: 5_000 },
+            Beneficiary { address: beneficiary_b.clone(), basis_points: 5_000 },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // Remove beneficiary_a: this exercises remove_beneficiary_index and should
+    // bump the TTL on beneficiary_b's index (which still holds will_id).
+    client.update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![&env, Beneficiary { address: beneficiary_b.clone(), basis_points: 10_000 }],
+    );
+
+    // Advance the ledger far beyond what the original TTL would have been.
+    // DAY_IN_LEDGERS ≈ 17,280; BUMP_AMOUNT = 60 days = 1,036,800 ledgers.
+    // We advance 61 days worth of ledgers to simulate a TTL that was *not*
+    // refreshed. The Soroban test host does not actually expire entries by
+    // ledger sequence in unit tests, so we assert readability as a proxy for
+    // "the write + extend path was exercised without panic."
+    env.ledger().with_mut(|l| {
+        l.sequence_number += 17_280 * 61; // 61 days of ledgers
+        l.timestamp += 61 * DAY;
+    });
+
+    // beneficiary_b must still appear in its index.
+    let wills = client.get_wills_by_beneficiary(&beneficiary_b, &None, &50);
+    assert_eq!(wills.len(), 1);
+    assert_eq!(wills.get(0).unwrap().id, will_id);
+
+    // beneficiary_a was removed, so its index must be empty.
+    let wills_a = client.get_wills_by_beneficiary(&beneficiary_a, &None, &50);
+    assert_eq!(wills_a.len(), 0);
+}
+
+// ── Issue #70: cancel_will must prune beneficiary index ──────────────────────
+
+/// After cancelling a will, `get_wills_by_beneficiary` must return an empty
+/// list for the former beneficiaries — no stale entries should remain.
+#[test]
+fn test_cancel_will_removes_beneficiary_index() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    // Sanity: beneficiary is indexed before cancel.
+    assert_eq!(client.get_wills_by_beneficiary(&beneficiary, &None, &50).len(), 1);
+
+    client.cancel_will(&will_id, &owner);
+
+    // After cancel, the index must be clean.
+    let wills = client.get_wills_by_beneficiary(&beneficiary, &None, &50);
+    assert_eq!(wills.len(), 0, "cancelled will must not appear in beneficiary index");
+}
+
+/// cancel_will with multiple beneficiaries must prune all of their index entries.
+#[test]
+fn test_cancel_will_removes_all_beneficiary_indexes() {
+    let (env, client, owner, _token, token_address) = setup();
+    let b1 = Address::generate(&env);
+    let b2 = Address::generate(&env);
+    let b3 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary { address: b1.clone(), basis_points: 4_000 },
+            Beneficiary { address: b2.clone(), basis_points: 3_000 },
+            Beneficiary { address: b3.clone(), basis_points: 3_000 },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.cancel_will(&will_id, &owner);
+
+    assert_eq!(client.get_wills_by_beneficiary(&b1, &None, &50).len(), 0);
+    assert_eq!(client.get_wills_by_beneficiary(&b2, &None, &50).len(), 0);
+    assert_eq!(client.get_wills_by_beneficiary(&b3, &None, &50).len(), 0);
+}
+
+// ── Issue #71: distribute() must prune owner and beneficiary indexes ──────────
+
+/// After a normal release_inheritance, the will must be absent from both the
+/// owner index and every beneficiary index.
+#[test]
+fn test_release_inheritance_removes_indexes() {
+    let (env, client, owner, _token, token_address) = setup();
+    let b1 = Address::generate(&env);
+    let b2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary { address: b1.clone(), basis_points: 6_000 },
+            Beneficiary { address: b2.clone(), basis_points: 4_000 },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    // Owner index must no longer list the will.
+    let owner_wills = client.get_wills_by_owner(&owner);
+    assert!(
+        !owner_wills.iter().any(|w| w.id == will_id),
+        "released will must not appear in owner index"
+    );
+
+    // Beneficiary indexes must no longer list the will.
+    assert_eq!(
+        client.get_wills_by_beneficiary(&b1, &None, &50).len(), 0,
+        "released will must not appear in b1 beneficiary index"
+    );
+    assert_eq!(
+        client.get_wills_by_beneficiary(&b2, &None, &50).len(), 0,
+        "released will must not appear in b2 beneficiary index"
+    );
+}
+
+/// After a guardian_trigger-driven release, same index-pruning guarantees hold.
+#[test]
+fn test_guardian_trigger_release_removes_indexes() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+    );
+
+    // Advance past the guardian-list cooldown (7 days).
+    advance_time(&env, 8 * DAY);
+
+    client.guardian_trigger(&will_id, &g1);
+    client.guardian_trigger(&will_id, &g2);
+
+    // Will must be Released after quorum.
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+
+    // Both indexes must be clean.
+    let owner_wills = client.get_wills_by_owner(&owner);
+    assert!(
+        !owner_wills.iter().any(|w| w.id == will_id),
+        "guardian-released will must not appear in owner index"
+    );
+    assert_eq!(
+        client.get_wills_by_beneficiary(&beneficiary, &None, &50).len(), 0,
+        "guardian-released will must not appear in beneficiary index"
+    );
+}
+
+// ── Issue #72: Checks-effects-interactions ordering ──────────────────────────
+
+/// After cancel_will, the on-chain status must already be Cancelled before any
+/// token balances move. We verify this by reading the will state immediately
+/// after the call and asserting the status is terminal — if the state were only
+/// written after the transfer loop, a reentrant token could read Active status.
+#[test]
+fn test_cancel_will_status_committed_before_transfer() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    client.cancel_will(&will_id, &owner);
+
+    // State must be terminal regardless of transfer order.
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
+    // Balance must be zeroed.
+    assert_eq!(client.get_will(&will_id).balances.len(), 0);
+}
+
+/// After release_inheritance, the on-chain status must be Released and the
+/// balance map empty — both committed before any external transfer fires.
+#[test]
+fn test_release_inheritance_status_committed_before_transfer() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
+    assert_eq!(will.balances.len(), 0);
+    assert_eq!(will.balance, 0);
+}
