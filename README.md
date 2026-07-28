@@ -7,6 +7,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.84%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![Soroban SDK](https://img.shields.io/badge/Soroban%20SDK-22.0.0-7D00FF)](https://developers.stellar.org/docs/build/smart-contracts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Security Policy](https://img.shields.io/badge/Security-Policy-blue.svg)](./SECURITY.md)
 [![Stellar Testnet](https://img.shields.io/badge/Stellar-Testnet-08b5e5?logo=stellar)](https://developers.stellar.org/docs/networks)
 
 **Live app: [sorowill.vercel.app](https://sorowill.vercel.app/)**
@@ -110,6 +111,10 @@ The deployed contract ID for Stellar Testnet is recorded in [`deployments/testne
   "deployedAt": "<ISO-8601 timestamp>"
 }
 ```
+
+## Security Policy
+
+Security reports and responsible disclosure guidelines are documented in [`SECURITY.md`](./SECURITY.md). Please do not open public GitHub issues for security vulnerabilities.
 
 ## Contributing via Drips Wave
 
