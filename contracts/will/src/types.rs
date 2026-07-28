@@ -166,6 +166,10 @@ pub struct Will {
     /// Schema version for this will. Used to track which contract version
     /// wrote this state and enable forward/backward compatible migrations.
     pub schema_version: u32,
+    /// Optional keeper bounty in basis points (e.g., 10 = 0.1%).
+    /// When set, a portion of the inheritance is paid to callers who trigger
+    /// or release the will (not to the owner). Defaults to 0.
+    pub keeper_bounty_bps: u32,
 }
 
 /// A single entry in a will's on-chain audit trail, recording one status
