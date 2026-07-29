@@ -126,6 +126,19 @@ const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
 /// Maximum keeper bounty in basis points (100 bps = 1%).
 const MAX_KEEPER_BOUNTY_BPS: u32 = 100;
 
+soroban_sdk::contractmeta!(
+    key = "Description",
+    val = "Trustless on-chain inheritance and dead man's switch protocol for Stellar Soroban"
+);
+soroban_sdk::contractmeta!(
+    key = "Version",
+    val = "0.1.0"
+);
+soroban_sdk::contractmeta!(
+    key = "Homepage",
+    val = "https://github.com/SoroWill/sorowill-contracts"
+);
+
 #[contract]
 pub struct WillContract;
 
