@@ -595,7 +595,13 @@ impl WillContract {
         will.beneficiaries = beneficiaries;
         storage::save_will(&env, &will);
 
-        events::beneficiaries_updated(&env, will_id, &owner);
+        events::beneficiaries_updated(
+            &env,
+            will_id,
+            &owner,
+            will.beneficiaries.len(),
+            &will.beneficiaries,
+        );
     }
 
     /// Allows a beneficiary to renounce their inheritance share in advance.

@@ -747,6 +747,68 @@ fn test_update_beneficiaries() {
 }
 
 #[test]
+fn test_update_beneficiaries_event_payload() {
+    let (env, client, owner, _token, token_address) = setup();
+    let original = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: original,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    let new_beneficiaries = SorobanVec::from_array(
+        &env,
+        [
+            Beneficiary {
+                address: b.clone(),
+                basis_points: 4_000,
+            },
+            Beneficiary {
+                address: c.clone(),
+                basis_points: 6_000,
+            },
+        ],
+    );
+    client.update_beneficiaries(&will_id, &owner, &new_beneficiaries);
+
+    use soroban_sdk::{symbol_short, testutils::Events, TryIntoVal};
+    let events = env.events().all();
+    let mut found = false;
+    for event in events.iter() {
+        if !event.1.is_empty() {
+            if let Ok(topic0) = event.1.get(0).unwrap().try_into_val(&env) {
+                let topic0_sym: soroban_sdk::Symbol = topic0;
+                if topic0_sym == symbol_short!("benefup") {
+                    found = true;
+                    let topic1: u64 = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+                    assert_eq!(topic1, will_id);
+                    // data: (owner, beneficiary_count, beneficiaries)
+                    let data: (Address, u32, SorobanVec<Beneficiary>) =
+                        event.2.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, owner);
+                    assert_eq!(data.1, 2);
+                    assert_eq!(data.2, new_beneficiaries);
+                }
+            }
+        }
+    }
+    assert!(found, "benefup event not found");
+}
+
+#[test]
 fn test_update_beneficiaries_fractional_split() {
     let (env, client, owner, token, token_address) = setup();
     let a = Address::generate(&env);

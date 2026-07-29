@@ -6,7 +6,7 @@
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
-use crate::types::GuardianVoteReason;
+use crate::types::{Beneficiary, GuardianVoteReason};
 
 /// Published when a new will is created.
 ///
@@ -79,9 +79,23 @@ pub fn will_cancelled(env: &Env, will_id: u64, owner: &Address, token_count: u32
 }
 
 /// Published when the owner updates the beneficiary list.
-pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
-    env.events()
-        .publish((symbol_short!("benefup"), will_id), owner.clone());
+///
+/// `beneficiary_count` is the number of entries in the new list, and
+/// `beneficiaries` is the full new list (address + basis-point pairs), so
+/// off-chain indexers can reconstruct the new split without a follow-up
+/// `get_will` call. Kept under Soroban's per-event size limits by relying on
+/// `MAX_BENEFICIARIES` (currently 10), which bounds the list length.
+pub fn beneficiaries_updated(
+    env: &Env,
+    will_id: u64,
+    owner: &Address,
+    beneficiary_count: u32,
+    beneficiaries: &Vec<Beneficiary>,
+) {
+    env.events().publish(
+        (symbol_short!("benefup"), will_id),
+        (owner.clone(), beneficiary_count, beneficiaries.clone()),
+    );
 }
 
 /// Published when the owner updates the guardian list.
