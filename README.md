@@ -102,6 +102,28 @@ how to reproduce and minimise a crash, and how to add a target.
 
 `checkin_period_days` and `grace_period_days` passed to `create_will` must each be at least `1` day (and at most `MAX_PERIOD_DAYS`); a value of `0` panics with `WillError::InvalidPeriod`.
 
+## Contract spec artifact
+
+A versioned, machine-readable export of the contract's public interface —
+every entry-point signature plus the `Will`, `Beneficiary`, `Guardian`,
+`WillStatus`, and `WillError` types — is committed under
+[`spec/`](./spec) as `will-v<crate-version>.json`. It's how
+[`sorowill-sdk`](https://github.com/SoroWill/sorowill-sdk) detects when its
+TypeScript types and XDR encoders have drifted from the deployed contract.
+
+Regenerate it after any change to a public entry point or shared type:
+
+```bash
+./scripts/export-spec.sh
+```
+
+A new file is committed per crate version rather than overwriting the
+previous one, so SDK maintainers can diff any two versions. The `Spec
+Export` GitHub Actions workflow (`.github/workflows/spec-export.yml`) also
+runs this on pushes to `main` that touch the contract, and attaches the
+resulting JSON to tagged GitHub Releases. See [`spec/README.md`](./spec/README.md)
+for the full update process.
+
 ## Testnet Deployment
 
 The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json), updated manually whenever a new version is deployed:
