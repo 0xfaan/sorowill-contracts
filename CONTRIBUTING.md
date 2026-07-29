@@ -26,6 +26,17 @@ For example: `feat/42-guardian-quorum-check` or `fix/17-checkin-deadline-roundin
 - Add or update unit tests for any behavior change in `contracts/will/src/test.rs`.
 - If you change validation rules or add an entry point, extend the fuzzing
   harness too — see [docs/FUZZING.md](./docs/FUZZING.md#adding-a-target).
+- If your PR changes contract behavior (new entrypoint, validation change,
+  event/error schema change, etc.), add an entry under `[Unreleased]` in
+  [CHANGELOG.md](./CHANGELOG.md) describing it in the "Added" / "Changed" /
+  "Fixed" section that fits. Pure docs/tooling/test-only PRs don't need one.
+- If your PR adds a new `WillError` variant, add a row for it to the
+  [error code table in the README](./README.md#error-codes) in the same PR —
+  don't let the table and `contracts/will/src/errors.rs` drift apart.
+- If your PR changes a public entry-point signature or a shared type
+  (`Will`, `Beneficiary`, `Guardian`, `WillStatus`, `WillError`, ...), bump
+  the crate `version` in `contracts/will/Cargo.toml` and regenerate the
+  contract spec artifact — see [spec/README.md](./spec/README.md).
 
 ## Local setup
 
