@@ -62,4 +62,8 @@ pub enum WillError {
     KeeperBountyExceedsMax = 19,
     /// Guardian threshold is out of range (must be 1..=guardians.len()).
     InvalidGuardianThreshold = 20,
+    /// The supplied token address does not implement the expected SEP-41
+    /// token interface (e.g. missing `decimals()`). Returned by `create_will`
+    /// when a lightweight upfront probe of the token fails.
+    InvalidToken = 21,
 }

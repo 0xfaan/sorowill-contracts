@@ -156,6 +156,42 @@ impl WillContract {
     /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
     /// - [`WillError::InvalidPeriod`] if either period is zero or exceeds
     ///   [`MAX_PERIOD_DAYS`].
+    /// - [`WillError::InvalidToken`] if any supplied token address does not respond to a
+    ///   read-only `decimals()` probe, indicating it is not a valid SEP-41 token.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Set up the environment and register the contract (test harness only).
+    /// let env = Env::default();
+    /// env.mock_all_auths();
+    /// let contract_id = env.register(WillContract, ());
+    /// let client = WillContractClient::new(&env, &contract_id);
+    ///
+    /// // Mint some USDC to the owner via a Stellar Asset Contract.
+    /// let owner = Address::generate(&env);
+    /// let usdc_id = env.register_stellar_asset_contract_v2(owner.clone()).address();
+    /// StellarAssetClient::new(&env, &usdc_id).mint(&owner, &1_000_000);
+    ///
+    /// let beneficiary = Address::generate(&env);
+    ///
+    /// // Create a will: lock 1 USDC, single beneficiary, 90-day check-in,
+    /// // 7-day grace period, no guardians.
+    /// let will_id = client.create_will(
+    ///     &owner,
+    ///     &vec![&env, (usdc_id.clone(), 1_000_000_i128)],
+    ///     &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+    ///     &90,  // checkin_period_days
+    ///     &7,   // grace_period_days
+    ///     &vec![&env],  // no guardians
+    ///     &1,           // guardian_threshold (ignored when no guardians)
+    ///     &None,        // no keeper bounty
+    /// );
+    ///
+    /// let will = client.get_will(&will_id);
+    /// assert_eq!(will.owner, owner);
+    /// assert_eq!(will.status, WillStatus::Active);
+    /// ```
     #[allow(clippy::too_many_arguments)]
     pub fn create_will(
         env: Env,
@@ -209,6 +245,17 @@ impl WillContract {
         for (token_addr, amount) in tokens.iter() {
             if amount <= 0 {
                 panic_with_error!(&env, WillError::ZeroAmount);
+            }
+            // Probe the token interface with a read-only `decimals()` call
+            // before attempting any transfer. A non-token address (or any
+            // contract that does not implement SEP-41) will fail here with a
+            // clear `InvalidToken` error rather than an opaque host-level
+            // cross-contract failure deep inside `transfer`.
+            if token::Client::new(&env, &token_addr)
+                .try_decimals()
+                .is_err()
+            {
+                panic_with_error!(&env, WillError::InvalidToken);
             }
             // Transfer this token from the owner into the contract.
             token::Client::new(&env, &token_addr).transfer(

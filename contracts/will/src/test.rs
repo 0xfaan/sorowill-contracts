@@ -5492,3 +5492,63 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── Issue #1: InvalidToken validation in create_will ─────────────────────────
+
+/// Passing the WillContract address itself (which has no `decimals()`) as the
+/// token must surface `WillError::InvalidToken` instead of an opaque host error.
+#[test]
+fn test_create_will_rejects_non_token_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    // Register the will contract itself — it has no `decimals()`.
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    // Use another registered WillContract as the "token" — no SEP-41 interface.
+    let fake_token_id = env.register(WillContract, ());
+
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (fake_token_id.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(WillError::InvalidToken.into())));
+}
+
+/// A plain account address (not a contract) should also yield `InvalidToken`.
+#[test]
+fn test_create_will_rejects_plain_account_as_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let not_a_token = Address::generate(&env); // just an account address
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (not_a_token.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(WillError::InvalidToken.into())));
+}
