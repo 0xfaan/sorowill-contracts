@@ -87,6 +87,36 @@ blocking; until then, treat a growing survivor count as a signal to
 prioritize test-writing, and file a follow-up issue for anything
 out of scope for the PR at hand.
 
+## Code coverage (cargo-llvm-cov)
+
+CI measures code coverage via `.github/workflows/coverage.yml` using
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov), which works
+well for `no_std`/Soroban crates because it runs against the host target —
+the test suite doesn't need to run under `wasm32v1-none` for coverage to be
+meaningful, only the release wasm build in `test.yml` does.
+
+The workflow enforces a baseline threshold of **60% line coverage**,
+chosen because the current suite already clears it comfortably. The goal
+is a meaningful floor against large regressions (e.g. a new entry point
+shipped with no tests), not a hard gate that blocks unrelated PRs over
+small, incidental dips. Raise the threshold over time as coverage improves.
+
+### Running it locally
+
+```sh
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+
+# Terminal summary
+cargo llvm-cov --workspace
+
+# lcov report (for editor integrations, e.g. VS Code's "Coverage Gutters")
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+# Browsable HTML report
+cargo llvm-cov --workspace --html --open
+```
+
 ## Learn more
 
 Full details on how Wave Programs work — applying, Points, rewards, and payouts — are documented at <https://drips.network/wave>.
