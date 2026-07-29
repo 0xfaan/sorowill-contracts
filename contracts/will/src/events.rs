@@ -6,7 +6,7 @@
 
 use soroban_sdk::{symbol_short, Address, Env};
 
-/// Published when a new will is created.
+/// Published when a new will is created (in PendingConfirmation or Active state).
 pub fn will_created(
     env: &Env,
     will_id: u64,
@@ -24,6 +24,12 @@ pub fn will_created(
             checkin_deadline,
         ),
     );
+}
+
+/// Published when the owner confirms a pending will, moving it to Active (issue #43).
+pub fn will_confirmed(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("confirmed"), will_id), owner.clone());
 }
 
 /// Published when the owner checks in, resetting the check-in deadline.
@@ -80,6 +86,8 @@ pub fn beneficiaries_updated(env: &Env, will_id: u64, owner: &Address) {
 pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
     env.events()
         .publish((symbol_short!("guardup"), will_id), owner.clone());
+}
+
 /// Published when the owner tops up the will's balance.
 pub fn top_up(env: &Env, will_id: u64, owner: &Address, amount: i128, new_balance: i128) {
     env.events().publish(
@@ -93,5 +101,22 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, votes_so_far:
     env.events().publish(
         (symbol_short!("gvote"), will_id),
         (guardian.clone(), votes_so_far),
+    );
+}
+
+/// Published when a will is split into two independent wills (issue #45).
+pub fn will_split(env: &Env, original_id: u64, new_id: u64, owner: &Address, split_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), original_id),
+        (new_id, owner.clone(), split_amount),
+    );
+}
+
+/// Published when a hashed-beneficiary reveals their pre-image and claims
+/// their share (issue #46).
+pub fn hashed_claimed(env: &Env, will_id: u64, claimant: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("hclaim"), will_id),
+        (claimant.clone(), amount),
     );
 }

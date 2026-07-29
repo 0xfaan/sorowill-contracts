@@ -7,7 +7,7 @@
 //! `(will_id, guardian)` pair so they can be cleared independently when a
 //! guardian-release cycle resets.
 
-use soroban_sdk::{contracttype, Address, Env, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, Env, Vec};
 
 use crate::errors::WillError;
 use crate::types::Will;
@@ -35,6 +35,9 @@ enum DataKey {
     BeneficiaryWills(Address),
     /// Whether a guardian has already voted in the current trigger cycle.
     GuardianVote(u64, Address),
+    /// Whether a specific hashed-beneficiary slot (identified by its
+    /// commitment hash) has already been claimed (issue #46).
+    HashedClaimed(u64, Bytes),
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
@@ -157,4 +160,25 @@ pub fn reset_guardian_votes(env: &Env, will_id: u64, guardians: &Vec<Address>) {
         let key = DataKey::GuardianVote(will_id, guardian.clone());
         env.storage().persistent().remove(&key);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hashed-beneficiary claim tracking (issue #46)
+// ---------------------------------------------------------------------------
+
+/// Returns whether the hashed-beneficiary slot identified by `commitment` on
+/// `will_id` has already been claimed.
+pub fn is_hashed_claimed(env: &Env, will_id: u64, commitment: &Bytes) -> bool {
+    let key = DataKey::HashedClaimed(will_id, commitment.clone());
+    env.storage().persistent().get(&key).unwrap_or(false)
+}
+
+/// Marks the hashed-beneficiary slot identified by `commitment` on `will_id`
+/// as claimed.
+pub fn set_hashed_claimed(env: &Env, will_id: u64, commitment: &Bytes) {
+    let key = DataKey::HashedClaimed(will_id, commitment.clone());
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }

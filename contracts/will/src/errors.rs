@@ -33,4 +33,25 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// The will is still in `PendingConfirmation` and cannot be operated on
+    /// until the owner calls `confirm_will` (issue #43).
+    WillNotConfirmed = 13,
+    /// `confirm_will` was called after the confirmation window has closed,
+    /// or the will is not in `PendingConfirmation` state (issue #43).
+    ConfirmationWindowExpired = 14,
+    /// The split amount exceeds the will's current balance (issue #45).
+    InsufficientBalance = 15,
+    /// The beneficiaries_to_split list is empty or would leave the original
+    /// will with no beneficiaries (issue #45).
+    InvalidSplit = 16,
+    /// The supplied pre-image does not match any commitment hash (issue #46).
+    InvalidPreimage = 17,
+    /// The hashed beneficiary slot has already been claimed (issue #46).
+    AlreadyClaimed = 18,
+    /// The threshold supplied for multi-sig is zero or exceeds the total
+    /// number of owners (issue #44).
+    InvalidThreshold = 19,
+    /// Not enough co-owner authorisations were presented for a privileged
+    /// action that requires the multi-sig threshold (issue #44).
+    ThresholdNotMet = 20,
 }
