@@ -49,8 +49,23 @@ cargo install --locked stellar-cli --features opt
 git clone https://github.com/SoroWill/sorowill-contracts.git
 cd sorowill-contracts
 cargo test
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
+
+### Task runner (recommended)
+
+This repo ships a [`justfile`](./justfile) with the exact commands CI runs, so you don't have to remember or copy them from this README. Install [`just`](https://github.com/casey/just#installation), then:
+
+```bash
+just --list    # see every available recipe
+just test      # cargo test --workspace
+just lint      # cargo clippy --all-targets -- -D warnings (CI's exact flags)
+just build     # cargo build --workspace --release --target wasm32v1-none
+just fmt       # cargo fmt --all
+just ci        # run everything CI runs, in order
+```
+
+If you don't have `just` installed, the raw `cargo` commands above work identically.
 
 ## Resource costs
 
