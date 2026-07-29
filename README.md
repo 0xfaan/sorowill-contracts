@@ -25,7 +25,7 @@ SoroWill is a trustless, on-chain inheritance protocol for Stellar Soroban. It l
 5. **Release.** If the grace period expires without an emergency check-in, anyone can call `release_inheritance`, which distributes the locked balance to every beneficiary proportionally, in one transaction.
 6. **Cancel anytime.** While the will is active, the owner can call `cancel_will` to withdraw the full balance.
 7. **Update beneficiaries.** While active, the owner can call `update_beneficiaries` to change who inherits and in what proportions.
-8. **Guardian override.** A will can name up to 3 guardians. Any 2 of them calling `guardian_trigger` force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive.
+8. **Guardian override.** A will can name up to 3 guardians. Any 2 of them calling `guardian_trigger` force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive. See [docs/adr/0001-guardian-threshold.md](./docs/adr/0001-guardian-threshold.md) for the rationale behind the 2-of-3 default, its known limitations, and how it relates to the proposed configurable M-of-N guardian feature.
 
 ## Tech Stack
 
