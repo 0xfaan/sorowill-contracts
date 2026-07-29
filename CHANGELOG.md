@@ -54,3 +54,18 @@ the `Beneficiary` type. Before upgrading a live deployment:
    on-chain shape.
 
 New error: `WillError::FixedAmountExceedsBalance` (21).
+
+### Event schema change: `will_created` publishes the full beneficiary list
+
+`events::will_created` previously published `beneficiaries_count: u32`. It
+now publishes the full beneficiary list (`Vec<Beneficiary>`, i.e. address +
+allocation pairs) so an off-chain indexer can reconstruct who a will's
+beneficiaries are directly from the creation event, without a follow-up
+`get_will` call.
+
+This list is bounded by `MAX_BENEFICIARIES` (currently 10) by contract
+validation before the event is published, keeping the payload comfortably
+inside Soroban's per-event size limit. If `MAX_BENEFICIARIES` is raised
+substantially in the future, this event will need to either truncate the
+list (with indexers falling back to `get_will` for the remainder) or split
+across multiple events.
