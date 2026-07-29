@@ -31,6 +31,14 @@ For example: `feat/42-guardian-quorum-check` or `fix/17-checkin-deadline-roundin
 
 See the [README](./README.md#local-setup) for toolchain installation and how to run the test suite.
 
+## Handling a flagged security advisory
+
+The [Security Audit](.github/workflows/audit.yml) workflow runs `cargo audit` against `Cargo.lock` on every PR, on every push to `main`, and once a day on a schedule so newly published advisories against dependencies already in the lockfile are caught too. If it fails:
+
+1. **Prefer upgrading.** Run `cargo update -p <crate>` (or bump the version in `Cargo.toml`/`contracts/will/Cargo.toml` if the fix needs a semver-major release), then confirm `cargo test` and `cargo clippy --all-targets -- -D warnings` still pass.
+2. **If no fix is available yet**, and you've confirmed the advisory doesn't apply to how this contract actually uses the crate (for example, the vulnerable code path is never reachable from the `no_std` wasm build), add the RUSTSEC id to the `ignore` list in [`audit.toml`](./audit.toml) with a comment explaining the justification and, if known, a tracking issue for the real fix. Never add an entry without a comment.
+3. Re-run `cargo audit --file Cargo.lock --deny warnings` locally (or `just audit`) to confirm the workflow will pass before opening the PR.
+
 ## Learn more
 
 Full details on how Wave Programs work — applying, Points, rewards, and payouts — are documented at <https://drips.network/wave>.
