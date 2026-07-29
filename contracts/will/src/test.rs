@@ -5492,3 +5492,179 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── Helper used by scale / index-corruption tests ────────────────────────────
+
+/// Convenience constructor for a `Beneficiary` with `basis_points` share.
+fn bp(address: &Address, basis_points: u32) -> Beneficiary {
+    Beneficiary {
+        address: address.clone(),
+        basis_points,
+    }
+}
+
+// ── Issue #3: Scale / concurrent-wills stress test ───────────────────────────
+
+/// Creates 200 wills spread across 20 distinct owners (10 wills each), with
+/// each will naming 2 distinct beneficiaries from a shared pool of 5.
+///
+/// After creation:
+/// - `get_wills_by_owner` is asserted for every owner.
+/// - `get_will` spot-checks several wills.
+/// - `check_in` and `top_up` are exercised on a subset of wills.
+/// - `get_wills_by_beneficiary` is checked for every beneficiary in the pool.
+///
+/// This exercises both the OwnerWills and BeneficiaryWills index growth paths
+/// to confirm no unexpected panics occur at realistic volume.
+#[test]
+fn test_scale_hundreds_of_wills() {
+    const WILLS_PER_OWNER: u32 = 10;
+    const NUM_OWNERS: u32 = 20;
+    const TOTAL_WILLS: u32 = WILLS_PER_OWNER * NUM_OWNERS;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    // Set up shared token.
+    let token_admin = Address::generate(&env);
+    let (token_client, token_admin_client) = create_token(&env, &token_admin);
+    let token_address = token_admin_client.address.clone();
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    // Shared pool of 5 beneficiaries; each will names 2 of them.
+    let beneficiaries: soroban_sdk::Vec<Address> = {
+        let mut v = soroban_sdk::Vec::new(&env);
+        for _ in 0..5 {
+            v.push_back(Address::generate(&env));
+        }
+        v
+    };
+
+    // Mint enough tokens for every owner.
+    let amount_per_will: i128 = 10_000;
+    let mint_per_owner: i128 = amount_per_will * WILLS_PER_OWNER as i128;
+    let owners: soroban_sdk::Vec<Address> = {
+        let mut v = soroban_sdk::Vec::new(&env);
+        for _ in 0..NUM_OWNERS {
+            let owner = Address::generate(&env);
+            token_admin_client.mint(&owner, &mint_per_owner);
+            v.push_back(owner);
+        }
+        v
+    };
+
+    // Create all wills and record their ids.
+    let mut all_ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
+    for o in 0..NUM_OWNERS as usize {
+        let owner = owners.get(o as u32).unwrap();
+        for w in 0..WILLS_PER_OWNER as usize {
+            // Pick two distinct beneficiaries from the shared pool by offset.
+            let b0 = beneficiaries.get((w % 5) as u32).unwrap();
+            let b1 = beneficiaries.get(((w + 1) % 5) as u32).unwrap();
+            let (bps0, bps1) = if b0 == b1 {
+                // Same address would be rejected; in this small pool that only
+                // happens at w=4 (4%5=4, 5%5=0) so we just use a different split.
+                (10_000u32, 0u32)
+            } else {
+                (6_000, 4_000)
+            };
+            let beneficiary_vec = if bps1 == 0 {
+                soroban_sdk::vec![&env, bp(&b0, 10_000)]
+            } else {
+                soroban_sdk::vec![&env, bp(&b0, bps0), bp(&b1, bps1)]
+            };
+            let will_id = client.create_will(
+                &owner,
+                &soroban_sdk::vec![&env, (token_address.clone(), amount_per_will)],
+                &beneficiary_vec,
+                &90,
+                &7,
+                &soroban_sdk::vec![&env],
+                &1,
+                &None,
+            );
+            all_ids.push_back(will_id);
+        }
+    }
+
+    // Sanity: total wills created matches expectation.
+    assert_eq!(all_ids.len(), TOTAL_WILLS);
+
+    // Assert get_wills_by_owner returns exactly WILLS_PER_OWNER for every owner.
+    for o in 0..NUM_OWNERS as usize {
+        let owner = owners.get(o as u32).unwrap();
+        let owner_wills = client.get_wills_by_owner(&owner);
+        assert_eq!(
+            owner_wills.len(),
+            WILLS_PER_OWNER,
+            "owner {} has wrong will count",
+            o
+        );
+        for will in owner_wills.iter() {
+            assert_eq!(will.owner, owner);
+            assert_eq!(will.status, WillStatus::Active);
+        }
+    }
+
+    // Spot-check get_will for the first and last will id.
+    let first_id = all_ids.get(0).unwrap();
+    let last_id = all_ids.get(TOTAL_WILLS - 1).unwrap();
+    assert_eq!(client.get_will(&first_id).status, WillStatus::Active);
+    assert_eq!(client.get_will(&last_id).status, WillStatus::Active);
+
+    // Exercise check_in on the first will of each owner.
+    advance_time(&env, 30 * DAY);
+    for o in 0..NUM_OWNERS as usize {
+        let owner = owners.get(o as u32).unwrap();
+        let will_id = all_ids.get((o as u32) * WILLS_PER_OWNER).unwrap();
+        client.check_in(&will_id, &owner);
+    }
+
+    // Exercise top_up on the second will of each owner.
+    for o in 0..NUM_OWNERS as usize {
+        let owner = owners.get(o as u32).unwrap();
+        // Mint a bit more for top_up.
+        token_admin_client.mint(&owner, &1_000);
+        let will_id = all_ids.get((o as u32) * WILLS_PER_OWNER + 1).unwrap();
+        client.top_up(&will_id, &owner, &token_address, &1_000);
+        let will = client.get_will(&will_id);
+        assert_eq!(
+            will.balances.get(token_address.clone()).unwrap(),
+            amount_per_will + 1_000
+        );
+    }
+
+    // Assert get_wills_by_beneficiary returns a non-empty list for each beneficiary.
+    // The exact count depends on how many wills named each address, but with
+    // 200 wills cycling through 5 beneficiaries each will should be named many times.
+    for b_idx in 0..5u32 {
+        let beneficiary_addr = beneficiaries.get(b_idx).unwrap();
+        let beneficiary_wills = client.get_wills_by_beneficiary(&beneficiary_addr);
+        assert!(
+            beneficiary_wills.len() > 0,
+            "beneficiary {} not named in any will",
+            b_idx
+        );
+        // Every returned will should list this beneficiary.
+        for will in beneficiary_wills.iter() {
+            let names_this_beneficiary = will
+                .beneficiaries
+                .iter()
+                .any(|b| b.address == beneficiary_addr);
+            assert!(
+                names_this_beneficiary,
+                "beneficiary index returned a will that does not name the beneficiary"
+            );
+        }
+    }
+
+    // Resource-cost note: at 200 wills the per-owner index (Vec<u64>) holds
+    // 10 entries. get_wills_by_owner must deserialize each will individually,
+    // so its instruction cost grows linearly with the per-owner will count.
+    // Beneficiary indexes are wider (each address can appear in ~80 of 200
+    // wills here) and get_wills_by_beneficiary scales accordingly. Neither
+    // dimension is expected to be a problem in practice for typical user
+    // activity, but callers with very large indexes should paginate via
+    // the cursor/limit overloads once those are added.
