@@ -393,3 +393,24 @@ fn update_beneficiaries_rejects_overflowing_basis_points() {
     // The rejected update must not have disturbed the stored list.
     assert_eq!(client.get_will(&will_id).beneficiaries, beneficiaries);
 }
+
+/// A checkin period one day above the maximum must still be rejected, not
+/// just values large enough to overflow the deadline arithmetic.
+#[test]
+fn create_will_rejects_period_just_above_maximum() {
+    let (env, client, owner, token) = setup();
+    let beneficiaries = single_beneficiary(&env, 10_000);
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
+
+    assert_eq!(
+        client.try_create_will(
+            &owner,
+            &tokens,
+            &beneficiaries,
+            &(crate::MAX_PERIOD_DAYS + 1),
+            &7,
+            &vec![&env]
+        ),
+        Err(Ok(WillError::InvalidPeriod.into()))
+    );
+}
