@@ -119,7 +119,7 @@ how to reproduce and minimise a crash, and how to add a target.
 
 ## Testnet Deployment
 
-The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json), updated manually whenever a new version is deployed:
+The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json):
 
 ```json
 {
@@ -128,6 +128,20 @@ The deployed contract ID for Stellar Testnet is recorded in [`deployments/testne
   "deployedAt": "<ISO-8601 timestamp>"
 }
 ```
+
+Redeploying is automated via [`scripts/deploy-testnet.sh`](./scripts/deploy-testnet.sh), which builds the release wasm, deploys it with `stellar contract deploy`, and rewrites this file with the new contract id and timestamp:
+
+```bash
+# One-time: create and fund a testnet identity
+stellar keys generate deployer --network testnet --fund
+
+# Build, deploy, and record the result in deployments/testnet.json
+DEPLOY_IDENTITY=deployer ./scripts/deploy-testnet.sh
+```
+
+Requires `stellar-cli` (same version as [Local Setup](#local-setup)) and a funded testnet identity passed via `DEPLOY_IDENTITY`. `NETWORK` and `RPC_URL` are optional overrides — see the script header for details.
+
+After running it, review and commit the updated `deployments/testnet.json` on its own — see [CONTRIBUTING.md](./CONTRIBUTING.md#updating-deploymentstestnetjson-after-a-redeploy) for the full checklist. A scheduled CI job also checks daily that this file's contract id still matches the on-chain wasm, so a forgotten update won't drift silently — see [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml).
 
 ## Security Policy
 
