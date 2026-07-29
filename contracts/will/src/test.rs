@@ -5775,3 +5775,63 @@ fn test_next_will_id_no_collisions_across_owners() {
     assert!(id_b < id_c, "ids must be strictly ordered: {id_b} < {id_c}");
 }
 
+// ── guardian_trigger on terminal wills (Issue #3) ────────────────────────────
+
+/// guardian_trigger on a Cancelled will must return WillNotActive.
+#[test]
+fn test_guardian_trigger_on_cancelled_will_returns_not_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    // Owner cancels the will.
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
+
+    // Attempting guardian_trigger on a Cancelled will must fail with WillNotActive.
+    let result = client.try_guardian_trigger(&will_id, &g1, &GuardianVoteReason::Incapacitated);
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
+
+/// guardian_trigger on a Released will must return WillNotActive.
+#[test]
+fn test_guardian_trigger_on_released_will_returns_not_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    // Miss check-in deadline, trigger, wait out grace period, then release.
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY); // grace period is 7 days
+    client.release_inheritance(&will_id, &None);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+
+    // Attempting guardian_trigger on a Released will must fail with WillNotActive.
+    let result = client.try_guardian_trigger(&will_id, &g1, &GuardianVoteReason::Incapacitated);
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
