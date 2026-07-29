@@ -329,6 +329,24 @@ impl WillContract {
 
     /// Resets the check-in countdown for `will_id`. Must be called by the
     /// will's owner or the designated delegate, and the will must be `Active`.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::NotOwner`] if `caller` is neither the owner nor the delegate.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Continuing from a will created with create_will …
+    /// // Advance time to just before the deadline, then check in.
+    /// env.ledger().with_mut(|l| l.timestamp += 80 * 86_400); // 80 days later
+    ///
+    /// client.check_in(&will_id, &owner);
+    ///
+    /// // The countdown resets; the will is still Active.
+    /// assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+    /// ```
     pub fn check_in(env: Env, will_id: u64, caller: Address) {
         caller.require_auth();
         let mut will = load_will(&env, will_id);
@@ -390,6 +408,19 @@ impl WillContract {
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::CheckinNotDue`] if the check-in deadline has not passed yet.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Continuing from a will created with a 90-day check-in period …
+    /// // Advance past the check-in deadline without calling check_in.
+    /// env.ledger().with_mut(|l| l.timestamp += 91 * 86_400); // 91 days later
+    ///
+    /// // Anyone can call trigger_will once the deadline is missed.
+    /// client.trigger_will(&will_id);
+    ///
+    /// assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+    /// ```
     pub fn trigger_will(env: Env, will_id: u64) {
         let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
@@ -491,6 +522,21 @@ impl WillContract {
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Continuing from a triggered will with a 7-day grace period …
+    /// // Advance past the grace period without calling emergency_checkin.
+    /// env.ledger().with_mut(|l| l.timestamp += 8 * 86_400); // 8 days after trigger
+    ///
+    /// // Anyone can release once the grace period has fully elapsed.
+    /// client.release_inheritance(&will_id, &None);
+    ///
+    /// // Funds have been distributed; the will is now Released.
+    /// assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+    /// // Each beneficiary's token balance reflects their basis-point share.
+    /// ```
     pub fn release_inheritance(env: Env, will_id: u64, caller: Option<Address>) {
         let mut will = load_will(&env, will_id);
         assert_status(
