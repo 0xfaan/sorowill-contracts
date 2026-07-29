@@ -62,4 +62,7 @@ pub enum WillError {
     KeeperBountyExceedsMax = 19,
     /// Guardian threshold is out of range (must be 1..=guardians.len()).
     InvalidGuardianThreshold = 20,
+    /// The owner or beneficiary has already reached the maximum number of
+    /// indexed wills. See [`storage::MAX_WILLS_PER_INDEX`] for the limit.
+    TooManyWills = 21,
 }

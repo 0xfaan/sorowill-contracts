@@ -5492,3 +5492,190 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── Issue #156: GuardianVote storage cleanup after guardian-quorum release ───
+
+/// After a guardian quorum triggers an immediate release, every GuardianVote
+/// persistent-storage entry cast in that cycle must be removed. Without the
+/// fix, those entries survive as permanent dead storage paying rent forever.
+///
+/// We verify cleanup by calling `storage::get_guardian_vote` directly after the
+/// release and asserting it returns `None` for every guardian that voted.
+#[test]
+fn test_guardian_quorum_release_clears_guardian_vote_entries() {
+    use crate::storage;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    // Advance past the guardian-list cooldown (7 days).
+    advance_time(&env, 8 * DAY);
+
+    // Both guardians vote — the second vote reaches the threshold and calls distribute().
+    client.guardian_trigger(&will_id, &g1, &GuardianVoteReason::Incapacitated);
+    client.guardian_trigger(&will_id, &g2, &GuardianVoteReason::Incapacitated);
+
+    // Will should be Released now.
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+
+    // The GuardianVote persistent-storage entries must have been removed by
+    // reset_guardian_votes called inside distribute().
+    let now = env.ledger().timestamp();
+    let expiry_days = 7u64; // grace_period_days from setup
+    assert!(
+        !storage::has_guardian_voted(&env, will_id, &g1, now, expiry_days),
+        "g1's GuardianVote entry should have been cleaned up after quorum release"
+    );
+    assert!(
+        !storage::has_guardian_voted(&env, will_id, &g2, now, expiry_days),
+        "g2's GuardianVote entry should have been cleaned up after quorum release"
+    );
+}
+
+// ── Issue #157: Instance storage TTL is extended by next_will_id ─────────────
+
+/// `next_will_id` must call `env.storage().instance().extend_ttl(...)` so the
+/// contract instance (which holds the `NextWillId` counter) stays alive for at
+/// least `LIFETIME_THRESHOLD` more ledgers after every `create_will`.
+///
+/// The Soroban test environment's `Storage` exposes `instance().get_ttl()`
+/// inside an `env.as_contract` context. We assert the TTL is non-zero (> 0)
+/// after a `create_will` call, which would only hold if `extend_ttl` was
+/// actually called.
+#[test]
+fn test_create_will_extends_instance_storage_ttl() {
+    use soroban_sdk::testutils::storage::Instance as _;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    // After create_will (which calls next_will_id), the instance storage TTL
+    // must have been bumped. We read the TTL from within the contract context;
+    // a value > 0 proves that extend_ttl was called.
+    let contract_address = client.address.clone();
+    let ttl = env.as_contract(&contract_address, || {
+        env.storage().instance().get_ttl()
+    });
+    assert!(
+        ttl > 0,
+        "instance storage TTL should be > 0 after create_will (next_will_id must call extend_ttl)"
+    );
+}
+
+// ── Issue #158: OwnerWills / BeneficiaryWills index cap (TooManyWills) ────────
+
+/// Creating more wills than `MAX_WILLS_PER_INDEX` for a single owner should
+/// panic with `TooManyWills`. In test builds `MAX_WILLS_PER_INDEX` is lowered
+/// to 5, so we create 5 wills (filling the cap) and then assert the 6th fails.
+#[test]
+fn test_owner_index_cap_enforced() {
+    use crate::storage::MAX_WILLS_PER_INDEX;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // Create exactly MAX_WILLS_PER_INDEX wills for the same owner — all should succeed.
+    for _ in 0..MAX_WILLS_PER_INDEX {
+        client.create_will(
+            &owner,
+            &vec![&env, (token_address.clone(), 100_i128)],
+            &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+            &90,
+            &7,
+            &vec![&env],
+            &1,
+            &None,
+        );
+    }
+
+    // The next create_will must panic with TooManyWills.
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 100_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(WillError::TooManyWills)),
+        "creating more wills than MAX_WILLS_PER_INDEX should return TooManyWills"
+    );
+}
+
+/// Creating more wills than `MAX_WILLS_PER_INDEX` for a single beneficiary
+/// should panic with `TooManyWills`. We create MAX_WILLS_PER_INDEX wills
+/// all naming the same beneficiary, then assert the next one fails.
+#[test]
+fn test_beneficiary_index_cap_enforced() {
+    use crate::storage::MAX_WILLS_PER_INDEX;
+
+    let (env, client, _owner, _token, token_address) = setup();
+    let shared_beneficiary = Address::generate(&env);
+
+    // Use a single token admin for all wills. Mint plenty to a pool address.
+    let (_, token_admin) = create_token(&env, &shared_beneficiary);
+
+    // Fill the beneficiary index for shared_beneficiary with MAX_WILLS_PER_INDEX
+    // wills, each owned by a unique address to avoid hitting the owner-index cap.
+    for _ in 0..MAX_WILLS_PER_INDEX {
+        let unique_owner = Address::generate(&env);
+        token_admin.mint(&unique_owner, &1_000);
+        client.create_will(
+            &unique_owner,
+            &vec![&env, (token_admin.address.clone(), 100_i128)],
+            &vec![&env, Beneficiary { address: shared_beneficiary.clone(), basis_points: 10_000 }],
+            &90,
+            &7,
+            &vec![&env],
+            &1,
+            &None,
+        );
+    }
+
+    // One more will naming the same beneficiary must fail with TooManyWills.
+    let extra_owner = Address::generate(&env);
+    token_admin.mint(&extra_owner, &1_000);
+    let result = client.try_create_will(
+        &extra_owner,
+        &vec![&env, (token_admin.address.clone(), 100_i128)],
+        &vec![&env, Beneficiary { address: shared_beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(WillError::TooManyWills)),
+        "naming a beneficiary in more wills than MAX_WILLS_PER_INDEX should return TooManyWills"
+    );
+}

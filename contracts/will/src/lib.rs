@@ -1706,6 +1706,20 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     will.balances = Map::new(env);
     will.status = WillStatus::Released;
 
+    // Clean up any guardian-vote entries that were cast in the current cycle.
+    // When a guardian quorum triggers distribute() directly (via
+    // guardian_trigger), the GuardianVote persistent-storage entries recorded
+    // for that cycle are never touched by emergency_checkin (which only runs
+    // on Triggered wills). Without this call those entries become permanent,
+    // unreachable dead storage that the contract keeps paying TTL-bump rent
+    // on for the lifetime of the instance. Clearing them here mirrors what
+    // emergency_checkin already does for the Active→Triggered→Active path.
+    storage::reset_guardian_votes(env, will);
+    // Zero the in-memory counter so the saved Released will has a consistent
+    // state (no votes, no vote records).
+    will.guardian_votes = 0;
+    will.guardian_vote_weight = 0;
+
     // Prune stale index entries (#71): remove the released will from the
     // owner index and from every beneficiary's reverse index.
     storage::remove_owner_index(env, &will.owner, will.id);
