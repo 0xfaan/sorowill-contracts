@@ -117,6 +117,15 @@ const MAX_TOKENS: u32 = 10;
 /// never drift apart silently during future refactors.
 const GUARDIAN_THRESHOLD: u32 = 2;
 
+/// Compile-time guard: the default guardian threshold must never exceed the
+/// maximum number of guardians a will may hold. Violating this relationship
+/// would make the default quorum permanently unreachable.
+const _: () = assert!(
+    GUARDIAN_THRESHOLD <= MAX_GUARDIANS,
+    "GUARDIAN_THRESHOLD must be <= MAX_GUARDIANS; \
+     a threshold that exceeds the guardian limit can never be reached"
+);
+
 /// Minimum number of wills that can be created in a single batch call.
 const BATCH_MIN: u32 = 1;
 
