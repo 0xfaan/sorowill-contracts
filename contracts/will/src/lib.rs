@@ -83,10 +83,16 @@ pub const CONTRACT_VERSION: u32 = 1_000_000;
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Maximum number of beneficiaries a single will may have.
-const MAX_BENEFICIARIES: u32 = 10;
+///
+/// Re-exported at the crate root so off-chain tooling can reference the
+/// canonical value without hardcoding a duplicate.
+pub const MAX_BENEFICIARIES: u32 = 10;
 
 /// Maximum number of guardians a single will may have.
-const MAX_GUARDIANS: u32 = 3;
+///
+/// Re-exported at the crate root so off-chain tooling can reference the
+/// canonical value without hardcoding a duplicate.
+pub const MAX_GUARDIANS: u32 = 3;
 
 /// Maximum length, in days, of a will's check-in or grace period (10 years).
 ///
@@ -101,7 +107,10 @@ const MAX_PERIOD_DAYS: u64 = 3_650;
 const MAX_TOKENS: u32 = 10;
 
 /// Number of distinct guardian votes required to force an early release.
-const GUARDIAN_THRESHOLD: u32 = 2;
+///
+/// Re-exported at the crate root so off-chain tooling can reference the
+/// canonical value without hardcoding a duplicate.
+pub const GUARDIAN_THRESHOLD: u32 = 2;
 
 /// Minimum number of wills that can be created in a single batch call.
 const BATCH_MIN: u32 = 1;
