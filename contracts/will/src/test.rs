@@ -5492,3 +5492,75 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── Atomicity of create_will when the token transfer fails ───────────────
+//
+// Soroban transactions are atomic: if any host call inside a contract
+// invocation fails (traps), every storage write performed earlier in that
+// same invocation is rolled back as if it never happened. `create_will`
+// relies on this: it writes the `Will` record, the `NextWillId` counter, and
+// the owner/beneficiary index entries only after the loop that performs the
+// token transfer for every entry. If `token::Client::transfer` panics (e.g.
+// the owner has insufficient balance or never approved a large enough
+// allowance for the contract to pull from), the whole invocation must
+// revert with no partial state left behind. This was previously an
+// assumption baked into the atomicity of the host — never directly
+// exercised by a test.
+#[test]
+fn test_create_will_reverts_atomically_on_insufficient_balance() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // owner was minted 1_000_000_000 in `setup`; ask for far more than that
+    // so the underlying SAC `transfer` call traps.
+    let excessive_amount = 10_000_000_000_i128;
+
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), excessive_amount)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert!(result.is_err(), "create_will should fail when the transfer cannot be completed");
+
+    // No Will record and no index entries should have been left behind by
+    // the failed attempt.
+    assert!(client.get_wills_by_owner(&owner).is_empty());
+    assert!(client.get_wills_by_beneficiary(&beneficiary).is_empty());
+
+    // The owner's balance must be untouched — the failed transfer must not
+    // have moved any funds either.
+    assert_eq!(token.balance(&owner), 1_000_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+
+    // `NextWillId` must not have been incremented by the failed attempt: the
+    // next *successful* call should still allocate id 1, not 2.
+    let good_will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert_eq!(
+        good_will_id, 1,
+        "a failed create_will must not have consumed a will id"
+    );
+}
