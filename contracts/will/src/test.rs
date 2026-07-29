@@ -5697,3 +5697,81 @@ fn test_guardian_cancel_trigger_rejects_active_will() {
     assert_eq!(result, Err(Ok(WillError::WillNotTriggered.into())));
 }
 
+// ── next_will_id monotonicity (Issue #2) ─────────────────────────────────────
+
+/// Asserts that next_will_id is strictly monotonically increasing across
+/// multiple sequential will creations within a single contract instance.
+///
+/// NOTE: The full upgrade-path scenario (creating wills, performing a
+/// state-preserving contract upgrade as introduced in issue #31, then
+/// verifying ids remain collision-free across the upgrade boundary) should be
+/// added once issue #31 is implemented.  This test covers the in-process
+/// monotonicity guarantee as a lightweight standalone baseline.
+#[test]
+fn test_next_will_id_is_monotonically_increasing() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let mut prev_id: u64 = 0;
+    for _ in 0..5 {
+        let will_id = client.create_will(
+            &owner,
+            &vec![&env, (token_address.clone(), 100_i128)],
+            &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+            &90,
+            &7,
+            &vec![&env],
+            &1,
+            &None,
+        );
+        assert!(will_id > prev_id, "will_id {will_id} must be strictly greater than previous {prev_id}");
+        prev_id = will_id;
+    }
+}
+
+/// Ids allocated across multiple owners must all be unique and increasing.
+#[test]
+fn test_next_will_id_no_collisions_across_owners() {
+    let (env, client, owner, _token, token_address) = setup();
+    let owner2 = Address::generate(&env);
+    // Mint tokens for the second owner using the same SAC admin.
+    let sac_admin = StellarAssetClient::new(&env, &token_address);
+    sac_admin.mint(&owner2, &1_000_000_000);
+
+    let beneficiary = Address::generate(&env);
+
+    let id_a = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 100_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    let id_b = client.create_will(
+        &owner2,
+        &vec![&env, (token_address.clone(), 100_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    let id_c = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 100_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+
+    assert!(id_a < id_b, "ids must be strictly ordered: {id_a} < {id_b}");
+    assert!(id_b < id_c, "ids must be strictly ordered: {id_b} < {id_c}");
+}
+
