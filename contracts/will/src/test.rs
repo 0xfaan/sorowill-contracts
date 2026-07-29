@@ -5492,3 +5492,208 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── guardian_cancel_trigger (Issue #1) ───────────────────────────────────────
+
+/// Happy path: two guardians vote to cancel an in-progress trigger.
+/// The will should return to Active with a fresh last_checkin.
+#[test]
+fn test_guardian_cancel_trigger_happy_path() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    // Advance past check-in deadline so trigger_will succeeds.
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+
+    // First cancel vote — below quorum.
+    client.guardian_cancel_trigger(&will_id, &g1);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Triggered);
+    assert_eq!(will.guardian_cancel_votes, 1);
+
+    // Second cancel vote — reaches quorum.
+    client.guardian_cancel_trigger(&will_id, &g2);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Active);
+    // trigger_time must be cleared.
+    assert!(will.trigger_time.is_none());
+    // cancel votes must be reset.
+    assert_eq!(will.guardian_cancel_votes, 0);
+    assert_eq!(will.guardian_cancel_vote_weight, 0);
+    // last_checkin must have advanced (was reset to now).
+    assert!(will.last_checkin >= 1_700_000_000 + 91 * DAY);
+}
+
+/// Insufficient votes: a single guardian vote below quorum does not cancel.
+#[test]
+fn test_guardian_cancel_trigger_insufficient_votes() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    // Only one guardian votes to cancel — not enough.
+    client.guardian_cancel_trigger(&will_id, &g1);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Triggered);
+    assert_eq!(will.guardian_cancel_votes, 1);
+}
+
+/// Non-guardian cannot cast a cancel vote.
+#[test]
+fn test_guardian_cancel_trigger_rejects_non_guardian() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let non_guardian = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone()],
+        &1,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    let result = client.try_guardian_cancel_trigger(&will_id, &non_guardian);
+    assert_eq!(result, Err(Ok(WillError::NotGuardian.into())));
+}
+
+/// A guardian cannot double-vote in the cancel namespace.
+#[test]
+fn test_guardian_cancel_trigger_no_double_vote() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    client.guardian_cancel_trigger(&will_id, &g1);
+    // Second attempt by same guardian must fail.
+    let result = client.try_guardian_cancel_trigger(&will_id, &g1);
+    assert_eq!(result, Err(Ok(WillError::AlreadyVoted.into())));
+}
+
+/// Release votes and cancel votes are independent: a guardian who cast a
+/// release vote (via guardian_trigger while Active) and then—after the will is
+/// later triggered via trigger_will—casts a cancel vote does not double-count,
+/// and vice-versa.  The two namespaces cannot interfere.
+#[test]
+fn test_guardian_cancel_trigger_independent_from_release_votes() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
+    );
+
+    // Advance past cooldown and check-in deadline.
+    advance_time(&env, 91 * DAY);
+
+    // g1 casts a release vote (guardian_trigger, requires Active status).
+    client.guardian_trigger(&will_id, &g1, &GuardianVoteReason::Incapacitated);
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+    // Will is still Active (threshold is 2, only 1 vote).
+
+    // Trigger the will via the normal missed-check-in path.
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+
+    // Now g1 casts a cancel vote. This is a separate namespace — g1's
+    // release vote does NOT prevent a cancel vote.
+    client.guardian_cancel_trigger(&will_id, &g1);
+    assert_eq!(client.get_will(&will_id).guardian_cancel_votes, 1);
+    // Release-vote count is unaffected by the cancel vote.
+    assert_eq!(client.get_will(&will_id).guardian_votes, 1);
+
+    // g2 also casts a cancel vote — quorum reached, will returns to Active.
+    client.guardian_cancel_trigger(&will_id, &g2);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Active);
+    // Both vote counters must be zeroed after the cancel.
+    assert_eq!(will.guardian_cancel_votes, 0);
+    assert_eq!(will.guardian_votes, 0);
+    // Token balance must be unchanged — no distribution occurred.
+    assert_eq!(token.balance(&beneficiary), 0);
+}
+
+/// guardian_cancel_trigger must reject calls when the will is not Triggered.
+#[test]
+fn test_guardian_cancel_trigger_rejects_active_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone()],
+        &1,
+        &None,
+    );
+
+    // Will is still Active — cancel_trigger must fail.
+    let result = client.try_guardian_cancel_trigger(&will_id, &g1);
+    assert_eq!(result, Err(Ok(WillError::WillNotTriggered.into())));
+}
+

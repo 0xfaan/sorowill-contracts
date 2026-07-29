@@ -119,6 +119,34 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, weight: u32, 
     );
 }
 
+/// Published each time a guardian votes to cancel a trigger (return to Active).
+pub fn guardian_cancel_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    weight: u32,
+    total_weight: u32,
+) {
+    env.events().publish(
+        (symbol_short!("gcvote"), will_id),
+        (guardian.clone(), weight, total_weight),
+    );
+}
+
+/// Published when guardian cancel-trigger votes reach quorum and the will is
+/// returned to `Active` status with a fresh check-in deadline.
+pub fn guardian_cancelled_trigger(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    next_deadline: u64,
+) {
+    env.events().publish(
+        (symbol_short!("gcancel"), will_id),
+        (guardian.clone(), next_deadline),
+    );
+}
+
 /// Published when two wills are merged into one.
 pub fn wills_merged(
     env: &Env,

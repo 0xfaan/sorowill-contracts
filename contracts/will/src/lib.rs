@@ -86,6 +86,10 @@ const SECONDS_PER_DAY: u64 = 86_400;
 const MAX_BENEFICIARIES: u32 = 10;
 
 /// Maximum number of guardians a single will may have.
+///
+/// A will can name at most this many guardian addresses. The value is an
+/// upper bound for the guardian list and is enforced at `create_will` and
+/// `update_guardians` time.
 const MAX_GUARDIANS: u32 = 3;
 
 /// Maximum length, in days, of a will's check-in or grace period (10 years).
@@ -101,6 +105,16 @@ const MAX_PERIOD_DAYS: u64 = 3_650;
 const MAX_TOKENS: u32 = 10;
 
 /// Number of distinct guardian votes required to force an early release.
+///
+/// This default threshold is used when a caller does not supply an explicit
+/// `guardian_threshold` to `create_will`. Individual wills may override the
+/// threshold within the range `1..=guardians.len()`.
+///
+/// **Invariant:** `GUARDIAN_THRESHOLD` must not exceed `MAX_GUARDIANS`.
+/// If it did, no will could ever satisfy the default quorum because a will
+/// can hold at most `MAX_GUARDIANS` guardians. The compile-time assertion
+/// immediately below enforces this relationship so the two constants can
+/// never drift apart silently during future refactors.
 const GUARDIAN_THRESHOLD: u32 = 2;
 
 /// Minimum number of wills that can be created in a single batch call.
@@ -245,6 +259,8 @@ impl WillContract {
             guardians: guardian_structs,
             guardian_vote_weight: 0,
             guardian_votes: 0,
+            guardian_cancel_vote_weight: 0,
+            guardian_cancel_votes: 0,
             guardian_threshold,
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -397,11 +413,15 @@ impl WillContract {
         // Clear the vote markers before zeroing the counter: the counter is
         // what tells `reset_guardian_votes` whether there is anything to clear.
         storage::reset_guardian_votes(&env, &will);
+        storage::reset_guardian_cancel_votes(&env, &will);
 
         will.status = WillStatus::Active;
         will.trigger_time = None;
         will.last_checkin = now;
         will.guardian_vote_weight = 0;
+        will.guardian_votes = 0;
+        will.guardian_cancel_vote_weight = 0;
+        will.guardian_cancel_votes = 0;
         storage::save_will(&env, &will);
 
         storage::unindex_triggered_will(&env, will_id);
@@ -725,6 +745,7 @@ impl WillContract {
 
         let now = env.ledger().timestamp();
         storage::reset_guardian_votes(&env, &will);
+        storage::reset_guardian_cancel_votes(&env, &will);
         let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
         for addr in guardians.iter() {
             guardian_structs.push_back(Guardian {
@@ -734,6 +755,8 @@ impl WillContract {
         }
         will.guardians = guardian_structs;
         will.guardian_votes = 0;
+        will.guardian_cancel_vote_weight = 0;
+        will.guardian_cancel_votes = 0;
         will.guardian_list_updated_at = now;
         will.guardian_vote_weight = 0;
         storage::save_will(&env, &will);
@@ -1086,6 +1109,96 @@ impl WillContract {
         }
     }
 
+    /// Casts a guardian vote to **cancel** an in-progress trigger and return
+    /// the will to `Active` status. This mirrors [`guardian_trigger`] but
+    /// operates on the opposite outcome: instead of forcing a release, a quorum
+    /// of guardians can collectively decide that the owner is still alive and
+    /// the trigger was premature.
+    ///
+    /// Vote records are stored under a separate `GuardianCancelVote` key so
+    /// that a guardian's release-vote and their cancel-vote are completely
+    /// independent — casting one does **not** prevent casting the other, but
+    /// a single guardian's vote cannot count toward both outcomes
+    /// simultaneously (each namespace is deduplicated on its own).
+    ///
+    /// When the accumulated cancel-vote weight reaches `guardian_threshold`,
+    /// the will is returned to `Active`, `last_checkin` is reset to now
+    /// (starting a fresh check-in countdown), and all cancel-vote records are
+    /// cleared.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will whose trigger should be cancelled.
+    /// - `guardian`: the guardian casting the cancel vote; must authorize.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
+    /// - [`WillError::NotGuardian`] if `guardian` is not one of the will's guardians.
+    /// - [`WillError::AlreadyVoted`] if `guardian` already cast a cancel vote in this cycle.
+    /// - [`WillError::GuardianCooldownActive`] if the guardian-list cooldown has not elapsed.
+    pub fn guardian_cancel_trigger(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+        assert_status(&env, &will, WillStatus::Triggered, WillError::WillNotTriggered);
+
+        // Enforce guardian-list cooldown (same rule as guardian_trigger).
+        let now = env.ledger().timestamp();
+        let cooldown_seconds = GUARDIAN_COOLDOWN_DAYS * SECONDS_PER_DAY;
+        let cooldown_ends = will.guardian_list_updated_at + cooldown_seconds;
+        if now < cooldown_ends {
+            panic_with_error!(&env, WillError::GuardianCooldownActive);
+        }
+
+        // Verify the caller is a named guardian and capture their weight.
+        let weight = match will.guardians.iter().find(|g| g.address == guardian) {
+            Some(g) => g.weight,
+            None => panic_with_error!(&env, WillError::NotGuardian),
+        };
+
+        // Deduplicate within the cancel-vote namespace only.
+        let expiry_days = will.grace_period_days;
+        if storage::has_guardian_cancel_voted(&env, will_id, &guardian, now, expiry_days) {
+            panic_with_error!(&env, WillError::AlreadyVoted);
+        }
+
+        storage::set_guardian_cancel_voted(&env, will_id, &guardian, now);
+        will.guardian_cancel_vote_weight += weight;
+        will.guardian_cancel_votes += 1;
+        storage::save_will(&env, &will);
+
+        events::guardian_cancel_voted(&env, will_id, &guardian, weight, will.guardian_cancel_vote_weight);
+
+        if will.guardian_cancel_votes >= will.guardian_threshold {
+            // Quorum reached: reset the will to Active, mirror emergency_checkin.
+            storage::reset_guardian_cancel_votes(&env, &will);
+            // Also clear any in-progress release votes so the release cycle
+            // starts clean if the will is ever triggered again.
+            storage::reset_guardian_votes(&env, &will);
+
+            will.status = WillStatus::Active;
+            will.trigger_time = None;
+            will.last_checkin = now;
+            will.guardian_vote_weight = 0;
+            will.guardian_votes = 0;
+            will.guardian_cancel_vote_weight = 0;
+            will.guardian_cancel_votes = 0;
+            storage::save_will(&env, &will);
+
+            storage::unindex_triggered_will(&env, will_id);
+
+            record_transition(
+                &env,
+                will_id,
+                WillStatus::Triggered,
+                WillStatus::Active,
+                &guardian,
+                symbol_short!("gcancel"),
+            );
+
+            let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
+            events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
+        }
+    }
+
     // ── #21: Will cloning / templates ────────────────────────────────────
 
     /// Clones an existing will's configuration into a new will with fresh
@@ -1164,6 +1277,8 @@ impl WillContract {
             guardians: source.guardians.clone(),
             guardian_vote_weight: 0,
             guardian_votes: 0,
+            guardian_cancel_vote_weight: 0,
+            guardian_cancel_votes: 0,
             guardian_threshold: source.guardian_threshold,
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
@@ -1298,6 +1413,8 @@ impl WillContract {
                 guardians: guardian_structs,
                 guardian_vote_weight: 0,
                 guardian_votes: 0,
+                guardian_cancel_vote_weight: 0,
+                guardian_cancel_votes: 0,
                 guardian_threshold: *guardian_threshold,
                 guardian_list_updated_at: now,
                 schema_version: CURRENT_SCHEMA_VERSION,
