@@ -31,6 +31,62 @@ For example: `feat/42-guardian-quorum-check` or `fix/17-checkin-deadline-roundin
 
 See the [README](./README.md#local-setup) for toolchain installation and how to run the test suite.
 
+## Mutation testing (cargo-mutants)
+
+Code coverage alone can't tell you whether an assertion is too weak or an
+edge case is missing — it only tells you a line ran, not that a test would
+notice if the logic on that line broke. [`cargo-mutants`](https://mutants.rs/)
+closes that gap: it systematically rewrites small pieces of the contract
+(flipping a comparison, changing a constant, swapping a boolean) and reruns
+the test suite against each mutant. A mutant that **survives** (tests still
+pass) means no test would have caught that bug.
+
+CI runs mutation testing automatically via `.github/workflows/mutants.yml`
+on every push and PR to `main`, but it is currently **advisory only**
+(`continue-on-error: true`) — a survived mutant does not fail the build. It
+will graduate to a blocking check once we've triaged an initial baseline
+and trust the signal.
+
+### Running it locally
+
+```sh
+cargo install cargo-mutants --locked
+cargo mutants --package will
+```
+
+This takes a while: cargo-mutants recompiles and reruns the test suite once
+per candidate mutation. To scope a run while iterating on a single file:
+
+```sh
+cargo mutants --package will --file contracts/will/src/storage.rs
+```
+
+Results are written to `mutants.out/` (or wherever `--output` points) as
+both a human-readable summary and a machine-readable list of mutants,
+grouped as `caught`, `missed` (survived), `unviable` (didn't compile), and
+`timeout`.
+
+### Interpreting a "survived mutant" result
+
+A survived mutant is a pointer at an *untested behavior*, not necessarily a
+real bug. For each one:
+
+1. Look at the diff cargo-mutants applied (e.g. `<` became `<=`, or a
+   returned value was replaced with a constant).
+2. Ask: is there a code path where this mutation would produce an
+   observably different result? If yes, the test suite is missing an
+   assertion or a test case for that path — add one.
+3. If the mutated code is genuinely unreachable or provably
+   behavior-preserving (rare, but happens with defensive/redundant checks),
+   it's fine to leave as a known, documented survivor rather than write a
+   test purely to satisfy the tool.
+
+New survivors introduced by a PR should be fixed by adding or strengthening
+a test in `contracts/will/src/test.rs` before merge, once the check is
+blocking; until then, treat a growing survivor count as a signal to
+prioritize test-writing, and file a follow-up issue for anything
+out of scope for the PR at hand.
+
 ## Learn more
 
 Full details on how Wave Programs work — applying, Points, rewards, and payouts — are documented at <https://drips.network/wave>.
