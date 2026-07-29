@@ -46,7 +46,7 @@ use soroban_sdk::{
     vec, Address, Env, Vec,
 };
 
-use crate::{Beneficiary, WillContract, WillContractClient};
+use crate::{Beneficiary, GuardianVoteReason, WillContract, WillContractClient};
 
 const DAY: u64 = 86_400;
 
@@ -182,6 +182,8 @@ impl Fixture<'_> {
             &90,
             &7,
             guardians,
+            &2,
+            &None,
         );
         (will_id, list)
     }
@@ -339,11 +341,11 @@ fn profile_guardians(report: &mut Report) {
     let first = guardians.get_unchecked(0);
     let second = guardians.get_unchecked(1);
 
-    f.client.guardian_trigger(&will_id, &first);
+    f.client.guardian_trigger(&will_id, &first, &GuardianVoteReason::Incapacitated);
     report.record(&f.env, "guardian_trigger (below threshold)");
 
     // The second vote reaches quorum and releases in the same invocation.
-    f.client.guardian_trigger(&will_id, &second);
+    f.client.guardian_trigger(&will_id, &second, &GuardianVoteReason::Incapacitated);
     report.record(&f.env, "guardian_trigger (reaches threshold)");
 
     // Clearing vote markers on a will that has votes to clear.
@@ -351,7 +353,7 @@ fn profile_guardians(report: &mut Report) {
     let g_guardians = two_guardians(&g.env);
     let (g_will_id, _) = g.create(&g_guardians);
     g.client
-        .guardian_trigger(&g_will_id, &g_guardians.get_unchecked(0));
+        .guardian_trigger(&g_will_id, &g_guardians.get_unchecked(0), &GuardianVoteReason::Incapacitated);
     g.client
         .update_guardians(&g_will_id, &g.owner, &two_guardians(&g.env));
     report.record(&g.env, "update_guardians (clearing a vote)");

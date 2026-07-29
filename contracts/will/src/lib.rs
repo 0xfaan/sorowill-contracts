@@ -57,15 +57,16 @@ mod fuzz_test;
 #[cfg(test)]
 mod test;
 
+use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Map, Vec};
+/// Malicious/reentrant SEP-41 token mock used for reentrancy regression
+/// testing. See the module docs for details.
+#[cfg(test)]
+mod test_support;
+
 use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Will, WillStatus, WillStatusTransition};
-use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env, Map, Vec};
-
-pub use errors::WillError;
-pub use types::{Beneficiary, Guardian, Will, WillStatus};
-pub use types::{Beneficiary, ProtocolStats, Will, WillStatus};
+pub use types::{Beneficiary, Guardian, GuardianVoteReason, ProtocolStats, Will, WillStatus, WillStatusTransition};
 
 /// Semantic version of the contract logic, encoded as
 /// `major * 1_000_000 + minor * 1_000 + patch`.
@@ -139,16 +140,9 @@ impl WillContract {
     ///   to prove they are alive; 1 to `MAX_PERIOD_DAYS`.
     /// - `guardians`: 0 to `MAX_GUARDIANS` distinct addresses that may jointly
     ///   force an early release.
-    /// - `beneficiaries`: 1 to `MAX_BENEFICIARIES` entries whose basis points sum to exactly 10,000.
-    /// - `checkin_period_days`: how many days the owner may go without checking in.
-    /// - `grace_period_days`: how many days after being triggered the owner has to prove they are alive.
-    /// - `guardians`: 0 to `MAX_GUARDIANS` guardians that may jointly force an early release.
-    ///   Each guardian has a vote weight; the accumulated weight must reach
-    ///   `GUARDIAN_THRESHOLD` to trigger.
-    /// - `guardians`: 0 to `MAX_GUARDIANS` addresses that may jointly force an early release.
-    /// - `is_native`: whether the asset is native XLM. When `true`, transfers use
-    ///   `env.transfer()` instead of the token client; the `token` address is still
-    ///   stored but the native path is used for all balance movements.
+    /// - `guardian_threshold`: number of guardian votes required to trigger.
+    ///   Must be between 1 and `guardians.len()`. Ignored when `guardians` is empty.
+    /// - `keeper_bounty_bps`: optional keeper bounty in basis points.
     ///
     /// # Returns
     /// The newly allocated will id.
@@ -171,6 +165,7 @@ impl WillContract {
         checkin_period_days: u64,
         grace_period_days: u64,
         guardians: Vec<Address>,
+        guardian_threshold: u32,
         keeper_bounty_bps: Option<u32>,
     ) -> u64 {
         owner.require_auth();
@@ -192,6 +187,23 @@ impl WillContract {
         assert_valid_guardians(&env, &owner, &guardians);
         assert_valid_periods(&env, checkin_period_days, grace_period_days);
 
+        // Validate guardian threshold when guardians are present.
+        if !guardians.is_empty() {
+            let threshold_range = 1..=guardians.len() as u32;
+            if !threshold_range.contains(&guardian_threshold) {
+                panic_with_error!(&env, WillError::InvalidGuardianThreshold);
+            }
+        }
+
+        // Convert addresses to Guardian structs with weight 1 and build balances.
+        let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
+        for addr in guardians.iter() {
+            guardian_structs.push_back(Guardian {
+                address: addr,
+                weight: 1,
+            });
+        }
+
         // Validate amounts and build the balances map.
         let mut balances: Map<Address, i128> = Map::new(&env);
         for (token_addr, amount) in tokens.iter() {
@@ -211,20 +223,8 @@ impl WillContract {
             balances.set(token_addr, prev + amount);
         }
 
-        let effective_expiry = if guardian_vote_expiry_days == 0 {
-            grace_period_days
-        } else {
-            guardian_vote_expiry_days as u64
-        };
-
-        if !grace_tiers.is_empty() {
-            validate_grace_tiers(&env, &grace_tiers, grace_period_days);
-        }
-
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
-
-        transfer_funds(&env, is_native, &token, &owner, &env.current_contract_address(), &amount);
 
         let beneficiaries_count = beneficiaries.len();
         let token_count = balances.len();
@@ -232,21 +232,9 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id);
         }
 
-        for guardian in guardians.iter() {
-            storage::set_guardian_consent(&env, will_id, &guardian, &GuardianConsent::Pending);
-        }
-
-        if let Some(ref fb) = fallback_beneficiary {
-            storage::set_fallback_beneficiary(&env, will_id, fb);
-        }
-
         let will = Will {
             id: will_id,
             owner: owner.clone(),
-            token: token.clone(),
-            token,
-            is_native,
-            balance: amount,
             balances,
             beneficiaries,
             checkin_period_days,
@@ -254,9 +242,10 @@ impl WillContract {
             last_checkin: now,
             trigger_time: None,
             status: WillStatus::Active,
-            guardians,
+            guardians: guardian_structs,
             guardian_vote_weight: 0,
             guardian_votes: 0,
+            guardian_threshold,
             guardian_list_updated_at: now,
             schema_version: CURRENT_SCHEMA_VERSION,
             keeper_bounty_bps: keeper_bounty,
@@ -264,7 +253,6 @@ impl WillContract {
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
         storage::increment_active_will_count(&env);
-        storage::adjust_locked_value(&env, &token, amount);
 
         record_transition(
             &env,
@@ -737,7 +725,14 @@ impl WillContract {
 
         let now = env.ledger().timestamp();
         storage::reset_guardian_votes(&env, &will);
-        will.guardians = guardians;
+        let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
+        for addr in guardians.iter() {
+            guardian_structs.push_back(Guardian {
+                address: addr,
+                weight: 1,
+            });
+        }
+        will.guardians = guardian_structs;
         will.guardian_votes = 0;
         will.guardian_list_updated_at = now;
         will.guardian_vote_weight = 0;
@@ -866,7 +861,14 @@ impl WillContract {
             assert_valid_guardians(&env, &owner, &new_guardians);
             let now = env.ledger().timestamp();
             storage::reset_guardian_votes(&env, &will);
-            will.guardians = new_guardians;
+            let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
+            for addr in new_guardians.iter() {
+                guardian_structs.push_back(Guardian {
+                    address: addr,
+                    weight: 1,
+                });
+            }
+            will.guardians = guardian_structs;
             will.guardian_votes = 0;
             will.guardian_list_updated_at = now;
             will.guardian_vote_weight = 0;
@@ -992,12 +994,7 @@ impl WillContract {
     ///   or `0` for the first page.
     /// - `limit`: maximum number of wills to return. Capped at
     ///   [`storage::MAX_PAGE_SIZE`].
-    pub fn get_wills_by_beneficiary(
-        env: Env,
-        beneficiary: Address,
-        cursor: Option<u64>,
-        limit: u32,
-    ) -> Vec<Will> {
+
     /// Returns the full state of every will owned by `owner` with the given `status`.
     pub fn get_wills_by_owner_and_status(
         env: Env,
@@ -1019,9 +1016,8 @@ impl WillContract {
     /// Returns the full state of every will `beneficiary` is named in.
     pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
-        let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in page.iter() {
+        for id in ids.iter() {
             if let Ok(will) = storage::load_will(&env, id) {
                 wills.push_back(will);
             }
@@ -1030,12 +1026,8 @@ impl WillContract {
     }
 
     /// Casts a guardian vote to force an early release of `will_id`, for use
-    /// when the owner is known to be incapacitated. Each guardian's configured
-    /// weight is added to the accumulated vote weight; once it reaches
-    /// [`GUARDIAN_THRESHOLD`], the balance is immediately distributed to
-    /// beneficiaries, bypassing the check-in and grace-period flow entirely.
     /// when the owner is known to be incapacitated. Once
-    /// [`GUARDIAN_THRESHOLD`] distinct guardians have voted, all balances are
+    /// `guardian_threshold` distinct guardians have voted, all balances are
     /// immediately distributed to beneficiaries, bypassing the check-in and
     /// grace-period flow entirely.
     ///
@@ -1043,12 +1035,15 @@ impl WillContract {
     /// guardian list was updated less than [`GUARDIAN_COOLDOWN_DAYS`] days ago,
     /// the vote is rejected with [`WillError::GuardianCooldownActive`].
     ///
+    /// # Parameters
+    /// - `reason`: the reason the guardian is casting the vote.
+    ///
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::NotGuardian`] if `guardian` is not one of the will's guardians.
     /// - [`WillError::AlreadyVoted`] if `guardian` already voted in this cycle.
     /// - [`WillError::GuardianCooldownActive`] if the guardian-list cooldown has not elapsed.
-    pub fn guardian_trigger(env: Env, will_id: u64, guardian: Address) {
+    pub fn guardian_trigger(env: Env, will_id: u64, guardian: Address, reason: GuardianVoteReason) {
         guardian.require_auth();
         let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
@@ -1061,29 +1056,24 @@ impl WillContract {
             panic_with_error!(&env, WillError::GuardianCooldownActive);
         }
 
-        if !will.guardians.contains(&guardian) {
-            panic_with_error!(&env, WillError::NotGuardian);
-        }
         let weight = match will.guardians.iter().find(|g| g.address == guardian) {
             Some(g) => g.weight,
             None => panic_with_error!(&env, WillError::NotGuardian),
         };
-        if storage::has_guardian_voted(&env, will_id, &guardian) {
+
+        let expiry_days = will.grace_period_days;
+        if storage::has_guardian_voted(&env, will_id, &guardian, now, expiry_days) {
             panic_with_error!(&env, WillError::AlreadyVoted);
         }
 
-        storage::set_guardian_voted(&env, will_id, &guardian);
+        storage::set_guardian_voted(&env, will_id, &guardian, now, reason);
         will.guardian_vote_weight += weight;
-        storage::save_will(&env, &will);
         will.guardian_votes += 1;
+        storage::save_will(&env, &will);
 
         events::guardian_voted(&env, will_id, &guardian, weight, will.guardian_vote_weight);
 
-        if will.guardian_vote_weight >= GUARDIAN_THRESHOLD {
-        // `distribute` persists the will itself. Saving here as well would
-        // write the whole entry twice — and extend its TTL twice — in the one
-        // invocation that reaches quorum.
-        if will.guardian_votes >= GUARDIAN_THRESHOLD {
+        if will.guardian_votes >= will.guardian_threshold {
             record_transition(
                 &env,
                 will_id,
@@ -1093,8 +1083,6 @@ impl WillContract {
                 symbol_short!("gtrigr"),
             );
             distribute(&env, &mut will, &None);
-        } else {
-            storage::save_will(&env, &will);
         }
     }
 
@@ -1174,8 +1162,12 @@ impl WillContract {
             trigger_time: None,
             status: WillStatus::Active,
             guardians: source.guardians.clone(),
+            guardian_vote_weight: 0,
             guardian_votes: 0,
+            guardian_threshold: source.guardian_threshold,
             guardian_list_updated_at: now,
+            schema_version: CURRENT_SCHEMA_VERSION,
+            keeper_bounty_bps: source.keeper_bounty_bps,
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
@@ -1224,6 +1216,7 @@ impl WillContract {
             u64,
             u64,
             Vec<Address>,
+            u32,
         )>,
     ) -> Vec<u64> {
         owner.require_auth();
@@ -1240,6 +1233,7 @@ impl WillContract {
                 checkin_period_days,
                 grace_period_days,
                 guardians,
+                guardian_threshold,
             ) = spec;
 
             // Inline the validation + creation logic (mirrors create_will)
@@ -1253,6 +1247,12 @@ impl WillContract {
             assert_valid_percentages(&env, &beneficiaries);
             assert_valid_guardians(&env, &owner, &guardians);
             assert_valid_periods(&env, checkin_period_days, grace_period_days);
+            if !guardians.is_empty() {
+                let threshold_range = 1..=guardians.len() as u32;
+                if !threshold_range.contains(guardian_threshold) {
+                    panic_with_error!(&env, WillError::InvalidGuardianThreshold);
+                }
+            }
 
             let mut balances: Map<Address, i128> = Map::new(&env);
             for (token_addr, amount) in tokens.iter() {
@@ -1266,6 +1266,14 @@ impl WillContract {
                 );
                 let prev = balances.get(token_addr.clone()).unwrap_or(0);
                 balances.set(token_addr, prev + amount);
+            }
+
+            let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
+            for addr in guardians.iter() {
+                guardian_structs.push_back(Guardian {
+                    address: addr,
+                    weight: 1,
+                });
             }
 
             let will_id = storage::next_will_id(&env);
@@ -1287,9 +1295,13 @@ impl WillContract {
                 last_checkin: now,
                 trigger_time: None,
                 status: WillStatus::Active,
-                guardians,
+                guardians: guardian_structs,
+                guardian_vote_weight: 0,
                 guardian_votes: 0,
+                guardian_threshold: *guardian_threshold,
                 guardian_list_updated_at: now,
+                schema_version: CURRENT_SCHEMA_VERSION,
+                keeper_bounty_bps: 0,
             };
             storage::save_will(&env, &will);
             storage::index_by_owner(&env, &owner, will_id);

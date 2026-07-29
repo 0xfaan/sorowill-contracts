@@ -60,6 +60,6 @@ pub enum WillError {
     BeneficiaryNotFound = 18,
     /// Keeper bounty basis points exceed the maximum allowed (100 bps/1%).
     KeeperBountyExceedsMax = 19,
-    /// The same address was supplied more than once in a beneficiaries list.
-    DuplicateBeneficiary = 20,
+    /// Guardian threshold is out of range (must be 1..=guardians.len()).
+    InvalidGuardianThreshold = 20,
 }

@@ -91,6 +91,9 @@ pub struct CreateWillInput {
     pub guardian_slots: Vec<u8>,
     pub checkin_period_days: u64,
     pub grace_period_days: u64,
+    /// Number of guardian votes required to trigger early release.
+    /// Sanitized to `1..=guardian_slots.len()`.
+    pub guardian_threshold: u32,
     /// When set, a successfully created will is driven all the way through
     /// trigger and release so the distribution path is fuzzed too.
     pub release_after_create: bool,
@@ -213,6 +216,13 @@ fn sanitize_create(input: &CreateWillInput) -> CreateWillInput {
         }
     }
 
+    let guardian_count = guardian_slots.len() as u32;
+    let threshold = if guardian_count > 0 {
+        input.guardian_threshold.clamp(1, guardian_count)
+    } else {
+        0
+    };
+
     CreateWillInput {
         mint: MAX_MINT,
         // 1..=1_000_000_000, so the owner can always cover it.
@@ -221,6 +231,7 @@ fn sanitize_create(input: &CreateWillInput) -> CreateWillInput {
         guardian_slots,
         checkin_period_days: input.checkin_period_days % MAX_PERIOD_DAYS + 1,
         grace_period_days: input.grace_period_days % MAX_PERIOD_DAYS + 1,
+        guardian_threshold: threshold,
         release_after_create: false,
     }
 }
@@ -286,6 +297,7 @@ pub fn run_create_will(input: &CreateWillInput) -> Outcome {
     let tokens: SorobanVec<(Address, i128)> =
         soroban_sdk::vec![&scenario.env, (scenario.token_address.clone(), input.amount)];
 
+    let keeper_bounty: Option<u32> = None;
     let result = scenario.client.try_create_will(
         &scenario.owner,
         &tokens,
@@ -293,6 +305,8 @@ pub fn run_create_will(input: &CreateWillInput) -> Outcome {
         &input.checkin_period_days,
         &input.grace_period_days,
         &guardians,
+        &input.guardian_threshold,
+        &keeper_bounty,
     );
 
     let will_id = match result {
@@ -340,7 +354,15 @@ fn assert_created_will(
     check(will.trigger_time.is_none(), input, "a new will already has a trigger time");
     check(will.guardian_votes == 0, input, "a new will already has guardian votes");
     check(will.beneficiaries == *beneficiaries, input, "stored beneficiaries differ from the supplied list");
-    check(will.guardians == *guardians, input, "stored guardians differ from the supplied list");
+    // Compare guardian addresses (stored as Vec<Guardian>).
+    let guardian_addresses: SorobanVec<Address> = {
+        let mut v: SorobanVec<Address> = SorobanVec::new(&scenario.env);
+        for g in will.guardians.iter() {
+            v.push_back(g.address.clone());
+        }
+        v
+    };
+    check(guardian_addresses == *guardians, input, "stored guardians differ from the supplied list");
 
     // Shares: bounds, and a sum computed in u128 so the check itself cannot
     // overflow while testing for overflow.
@@ -569,6 +591,7 @@ fn create_valid_will(
     let tokens: SorobanVec<(Address, i128)> =
         soroban_sdk::vec![&scenario.env, (scenario.token_address.clone(), create.amount)];
 
+    let keeper_bounty: Option<u32> = None;
     match scenario.client.try_create_will(
         &scenario.owner,
         &tokens,
@@ -576,6 +599,8 @@ fn create_valid_will(
         &create.checkin_period_days,
         &create.grace_period_days,
         &guardians,
+        &create.guardian_threshold,
+        &keeper_bounty,
     ) {
         Ok(Ok(will_id)) => will_id,
         Ok(Err(_)) => violation(input, "create_will returned a value that is not a u64 will id"),
