@@ -5668,3 +5668,67 @@ fn test_scale_hundreds_of_wills() {
     // dimension is expected to be a problem in practice for typical user
     // activity, but callers with very large indexes should paginate via
     // the cursor/limit overloads once those are added.
+}
+
+// ── Issue #4: Corrupted-index entries now panic rather than silently vanish ──
+
+/// Injects a phantom will id (999) into the owner index without storing the
+/// corresponding `Will` entry, then asserts that `get_wills_by_owner` panics
+/// (WillError::WillNotFound) instead of silently returning a shorter list.
+#[test]
+#[should_panic]
+fn test_get_wills_by_owner_panics_on_corrupted_index() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // Create a real will so the owner index exists.
+    client.create_will(
+        &owner,
+        &soroban_sdk::vec![&env, (token_address, 1_000_000_i128)],
+        &soroban_sdk::vec![&env, bp(&beneficiary, 10_000)],
+        &90,
+        &7,
+        &soroban_sdk::vec![&env],
+        &1,
+        &None,
+    );
+
+    // Directly inject a phantom will id into the owner's index using the
+    // storage layer. Will id 999 has no corresponding Will entry in storage.
+    env.as_contract(&client.address, || {
+        crate::storage::index_by_owner(&env, &owner, 999);
+    });
+
+    // This must panic (WillNotFound) rather than silently returning 1 result.
+    client.get_wills_by_owner(&owner);
+}
+
+/// Injects a phantom will id (999) into the beneficiary index without storing
+/// the corresponding `Will` entry, then asserts that `get_wills_by_beneficiary`
+/// panics (WillError::WillNotFound) instead of silently returning a shorter list.
+#[test]
+#[should_panic]
+fn test_get_wills_by_beneficiary_panics_on_corrupted_index() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // Create a real will so the beneficiary index exists.
+    client.create_will(
+        &owner,
+        &soroban_sdk::vec![&env, (token_address, 1_000_000_i128)],
+        &soroban_sdk::vec![&env, bp(&beneficiary, 10_000)],
+        &90,
+        &7,
+        &soroban_sdk::vec![&env],
+        &1,
+        &None,
+    );
+
+    // Inject a phantom will id into the beneficiary's index.
+    env.as_contract(&client.address, || {
+        crate::storage::index_by_beneficiary(&env, &beneficiary, 999);
+    });
+
+    // This must panic (WillNotFound) rather than silently returning 1 result.
+    client.get_wills_by_beneficiary(&beneficiary);
+}

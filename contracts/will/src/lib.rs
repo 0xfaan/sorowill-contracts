@@ -998,9 +998,10 @@ impl WillContract {
         let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
         for id in page.iter() {
-            if let Ok(will) = storage::load_will(&env, id) {
-                wills.push_back(will);
-            }
+            wills.push_back(match storage::load_will(&env, id) {
+                Ok(will) => will,
+                Err(e) => panic_with_error!(&env, e),
+            });
         }
         wills
     }
@@ -1026,10 +1027,12 @@ impl WillContract {
         let ids = storage::get_owner_wills(&env, &owner);
         let mut wills = Vec::new(&env);
         for id in ids.iter() {
-            if let Ok(will) = storage::load_will(&env, id) {
-                if will.status == status {
-                    wills.push_back(will);
-                }
+            let will = match storage::load_will(&env, id) {
+                Ok(w) => w,
+                Err(e) => panic_with_error!(&env, e),
+            };
+            if will.status == status {
+                wills.push_back(will);
             }
         }
         wills
@@ -1040,9 +1043,10 @@ impl WillContract {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
         let mut wills = Vec::new(&env);
         for id in ids.iter() {
-            if let Ok(will) = storage::load_will(&env, id) {
-                wills.push_back(will);
-            }
+            wills.push_back(match storage::load_will(&env, id) {
+                Ok(will) => will,
+                Err(e) => panic_with_error!(&env, e),
+            });
         }
         wills
     }
