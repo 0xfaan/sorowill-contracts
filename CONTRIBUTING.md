@@ -31,6 +31,45 @@ For example: `feat/42-guardian-quorum-check` or `fix/17-checkin-deadline-roundin
 
 See the [README](./README.md#local-setup) for toolchain installation and how to run the test suite.
 
+## Integration tests
+
+`cargo test` only exercises contract logic through soroban_sdk's in-process
+`Env::default()` test harness — it never touches the compiled `.wasm`
+artifact or a real Soroban host. To catch build- or host-environment-specific
+issues (wasm size limits, host function availability, XDR encoding
+mismatches), there's a separate integration layer that builds the real wasm,
+deploys it to a local Soroban network, and drives a handful of core lifecycle
+calls (`create_will`, `get_will`, `get_will_status`, `check_in`,
+`cancel_will`) through the real `stellar contract invoke` CLI.
+
+To run it locally:
+
+```bash
+# Requires: stellar-cli (>= 22.0.0), docker, jq
+./scripts/integration_test.sh
+```
+
+The script builds `will.wasm` for `wasm32v1-none`, starts a local standalone
+Soroban network (via `stellar network start local`, which uses the quickstart
+docker image), deploys the contract, and asserts the will's status
+transitions correctly across the calls above. It tears the local network
+down on exit, whether it succeeds or fails.
+
+The same lifecycle check is also wrapped in an `#[ignore]`-gated Rust test at
+[`contracts/will/tests/integration.rs`](./contracts/will/tests/integration.rs),
+runnable directly with:
+
+```bash
+cargo test --package will --test integration -- --ignored
+```
+
+This is intentionally excluded from the fast `cargo test --workspace` path
+(see the `test.yml` CI job) since it needs `stellar` + `docker` and takes
+substantially longer. It instead runs as its own `Integration` CI job (see
+`.github/workflows/integration.yml`) on pushes to `main`, on a daily
+schedule, and on manual `workflow_dispatch` — mirroring how the `fuzz.yml`
+job is kept out of the per-PR path.
+
 ## Learn more
 
 Full details on how Wave Programs work — applying, Points, rewards, and payouts — are documented at <https://drips.network/wave>.
