@@ -992,12 +992,7 @@ impl WillContract {
     ///   or `0` for the first page.
     /// - `limit`: maximum number of wills to return. Capped at
     ///   [`storage::MAX_PAGE_SIZE`].
-    pub fn get_wills_by_beneficiary(
-        env: Env,
-        beneficiary: Address,
-        cursor: Option<u64>,
-        limit: u32,
-    ) -> Vec<Will> {
+
     /// Returns the full state of every will owned by `owner` with the given `status`.
     pub fn get_wills_by_owner_and_status(
         env: Env,
@@ -1019,9 +1014,8 @@ impl WillContract {
     /// Returns the full state of every will `beneficiary` is named in.
     pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
-        let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in page.iter() {
+        for id in ids.iter() {
             if let Ok(will) = storage::load_will(&env, id) {
                 wills.push_back(will);
             }
