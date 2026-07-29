@@ -39,6 +39,15 @@ The [Security Audit](.github/workflows/audit.yml) workflow runs `cargo audit` ag
 2. **If no fix is available yet**, and you've confirmed the advisory doesn't apply to how this contract actually uses the crate (for example, the vulnerable code path is never reachable from the `no_std` wasm build), add the RUSTSEC id to the `ignore` list in [`audit.toml`](./audit.toml) with a comment explaining the justification and, if known, a tracking issue for the real fix. Never add an entry without a comment.
 3. Re-run `cargo audit --file Cargo.lock --deny warnings` locally (or `just audit`) to confirm the workflow will pass before opening the PR.
 
+## Updating deployments/testnet.json after a redeploy
+
+`deployments/testnet.json` is the source of truth integrators (the SDK, the app) use to find the live testnet contract, so keep it accurate:
+
+1. Run `DEPLOY_IDENTITY=<your funded identity> ./scripts/deploy-testnet.sh` from the repo root (see [README.md#testnet-deployment](./README.md#testnet-deployment)). It builds the contract, deploys it, and overwrites `deployments/testnet.json` with the new contract id and an ISO-8601 timestamp.
+2. Review the diff (`git diff -- deployments/testnet.json`) before committing — a routine redeploy should only ever change `WillContract` and `deployedAt`, never `network`.
+3. Commit the updated file on its own, with a message that includes the new contract id, e.g. `chore: record testnet deployment CABC...`.
+4. The scheduled [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml) workflow compares the on-chain wasm hash for the recorded contract id against the wasm built from `main` once a day. If you forget to update this file after a redeploy, that job fails loudly instead of letting the recorded id silently drift from what's actually on-chain.
+
 ## Learn more
 
 Full details on how Wave Programs work — applying, Points, rewards, and payouts — are documented at <https://drips.network/wave>.
