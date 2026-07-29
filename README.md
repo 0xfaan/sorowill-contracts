@@ -63,7 +63,9 @@ cargo test -p will --lib profile -- --nocapture
 
 See [docs/RESOURCE_COSTS.md](./docs/RESOURCE_COSTS.md) for the current numbers,
 what drives each entry point's cost, and the storage layout trade-offs behind
-them.
+them. The release build profile is separately tuned for `.wasm` binary size
+(deploy cost) — see [docs/WASM_SIZE.md](./docs/WASM_SIZE.md).
+
 ## Testing and fuzzing
 
 `cargo test` runs the hand-written suite in `contracts/will/src/test.rs`
