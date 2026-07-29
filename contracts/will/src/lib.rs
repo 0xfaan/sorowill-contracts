@@ -57,6 +57,19 @@ mod fuzz_test;
 #[cfg(test)]
 mod test;
 
+/// Unit tests for the mixed percentage/fixed-amount `Allocation` model.
+#[cfg(test)]
+mod allocation_test;
+
+/// Unit test asserting on the extended `will_created` event payload.
+#[cfg(test)]
+mod event_test;
+
+/// Regression test: a beneficiary-list change must be the list actually
+/// used when the will is later triggered and released.
+#[cfg(test)]
+mod beneficiary_lifecycle_test;
+
 use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Map, Vec};
 /// Malicious/reentrant SEP-41 token mock used for reentrancy regression
 /// testing. See the module docs for details.
@@ -66,7 +79,10 @@ mod test_support;
 use soroban_sdk::{contract, contractimpl, panic_with_error, symbol_short, token, Address, Env, Vec};
 
 pub use errors::WillError;
-pub use types::{Beneficiary, Guardian, GuardianVoteReason, ProtocolStats, Will, WillStatus, WillStatusTransition};
+pub use types::{
+    Allocation, Beneficiary, Guardian, GuardianVoteReason, ProtocolStats, Will, WillStatus,
+    WillStatusTransition,
+};
 
 /// Semantic version of the contract logic, encoded as
 /// `major * 1_000_000 + minor * 1_000 + patch`.
@@ -183,7 +199,6 @@ impl WillContract {
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
-        assert_valid_percentages(&env, &beneficiaries);
         assert_valid_guardians(&env, &owner, &guardians);
         assert_valid_periods(&env, checkin_period_days, grace_period_days);
 
@@ -222,6 +237,8 @@ impl WillContract {
             let prev = balances.get(token_addr.clone()).unwrap_or(0);
             balances.set(token_addr, prev + amount);
         }
+
+        assert_valid_allocations(&env, &beneficiaries, total_balance(&balances));
 
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
@@ -268,7 +285,7 @@ impl WillContract {
             will_id,
             &owner,
             token_count,
-            beneficiaries_count,
+            &will.beneficiaries,
             now + checkin_period_days * SECONDS_PER_DAY,
         );
 
@@ -573,7 +590,7 @@ impl WillContract {
         if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
             panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
-        assert_valid_percentages(&env, &beneficiaries);
+        assert_valid_allocations(&env, &beneficiaries, total_balance(&will.balances));
 
         // Only addresses that actually join or leave the will need their
         // reverse index touched. Unconditionally removing every old address
@@ -629,11 +646,11 @@ impl WillContract {
 
         // Find and remove the renouncing beneficiary
         let mut found_index: Option<usize> = None;
-        let mut renounced_basis_points: u32 = 0;
+        let mut renounced_allocation: Option<Allocation> = None;
         for (index, b) in will.beneficiaries.iter().enumerate() {
             if b.address == beneficiary {
                 found_index = Some(index);
-                renounced_basis_points = b.basis_points;
+                renounced_allocation = Some(b.allocation);
                 break;
             }
         }
@@ -651,35 +668,65 @@ impl WillContract {
             }
         }
 
-        // If there are remaining beneficiaries, redistribute the renounced share
-        if !new_beneficiaries.is_empty() {
-            // Redistribute the renounced basis points proportionally to remaining beneficiaries
-            let remaining_basis_points: u32 = new_beneficiaries
-                .iter()
-                .map(|b| b.basis_points)
-                .fold(0u32, |acc, bp| acc.saturating_add(bp));
+        // A renounced `FixedAmount` share needs no redistribution: `distribute`
+        // computes fixed payouts dynamically from the current beneficiary
+        // list, so simply removing the entry leaves more of the balance for
+        // percentage-based beneficiaries automatically. Only a renounced
+        // `Percentage` share needs its basis points redistributed explicitly.
+        let renounced_basis_points = match renounced_allocation {
+            Some(Allocation::Percentage(bp)) => bp,
+            _ => 0,
+        };
+
+        if renounced_basis_points > 0 && !new_beneficiaries.is_empty() {
+            // Redistribute the renounced basis points proportionally across
+            // the remaining percentage-based beneficiaries.
+            let mut remaining_basis_points: u32 = 0;
+            for b in new_beneficiaries.iter() {
+                if let Allocation::Percentage(bp) = b.allocation {
+                    remaining_basis_points = remaining_basis_points.saturating_add(bp);
+                }
+            }
 
             if remaining_basis_points > 0 {
                 let mut updated_beneficiaries: Vec<Beneficiary> = Vec::new(&env);
                 let mut total_redistributed: u32 = 0;
+                let mut percentage_seen: u32 = 0;
+                let mut percentage_total: u32 = 0;
+                for b in new_beneficiaries.iter() {
+                    if let Allocation::Percentage(_) = b.allocation {
+                        percentage_total += 1;
+                    }
+                }
 
-                for (i, beneficiary_entry) in new_beneficiaries.iter().enumerate() {
-                    let share_of_renounced = if i as u32 == (new_beneficiaries.len() - 1) as u32 {
-                        // Last beneficiary gets any rounding remainder
-                        renounced_basis_points - total_redistributed
-                    } else {
-                        // Proportional share of the renounced percentage
-                        let portion = (renounced_basis_points as u128
-                            * beneficiary_entry.basis_points as u128)
-                            / remaining_basis_points as u128;
-                        total_redistributed = total_redistributed.saturating_add(portion as u32);
-                        portion as u32
-                    };
-
-                    updated_beneficiaries.push_back(Beneficiary {
-                        address: beneficiary_entry.address.clone(),
-                        basis_points: beneficiary_entry.basis_points.saturating_add(share_of_renounced),
-                    });
+                for beneficiary_entry in new_beneficiaries.iter() {
+                    match beneficiary_entry.allocation {
+                        Allocation::Percentage(bp) => {
+                            percentage_seen += 1;
+                            let share_of_renounced = if percentage_seen == percentage_total {
+                                // Last percentage beneficiary absorbs the rounding remainder.
+                                renounced_basis_points - total_redistributed
+                            } else {
+                                let portion = (renounced_basis_points as u128 * bp as u128)
+                                    / remaining_basis_points as u128;
+                                total_redistributed =
+                                    total_redistributed.saturating_add(portion as u32);
+                                portion as u32
+                            };
+                            updated_beneficiaries.push_back(Beneficiary {
+                                address: beneficiary_entry.address.clone(),
+                                allocation: Allocation::Percentage(
+                                    bp.saturating_add(share_of_renounced),
+                                ),
+                            });
+                        }
+                        fixed => {
+                            updated_beneficiaries.push_back(Beneficiary {
+                                address: beneficiary_entry.address.clone(),
+                                allocation: fixed,
+                            });
+                        }
+                    }
                 }
 
                 will.beneficiaries = updated_beneficiaries;
@@ -687,8 +734,8 @@ impl WillContract {
                 will.beneficiaries = new_beneficiaries;
             }
         } else {
-            // If this was the only beneficiary, the will now has no beneficiaries
-            // This is an edge case but we allow it (distribution would fail later)
+            // Either the renounced share was a fixed amount (nothing to
+            // redistribute), or this was the only beneficiary.
             will.beneficiaries = new_beneficiaries;
         }
 
@@ -838,7 +885,7 @@ impl WillContract {
             if new_beneficiaries.is_empty() || new_beneficiaries.len() > MAX_BENEFICIARIES {
                 panic_with_error!(&env, WillError::TooManyBeneficiaries);
             }
-            assert_valid_percentages(&env, &new_beneficiaries);
+            assert_valid_allocations(&env, &new_beneficiaries, total_balance(&will.balances));
 
             // Update reverse indexes
             for old in will.beneficiaries.iter() {
@@ -1177,7 +1224,7 @@ impl WillContract {
             will_id,
             &owner,
             token_count,
-            beneficiaries_count,
+            &will.beneficiaries,
             now + source.checkin_period_days * SECONDS_PER_DAY,
         );
         events::will_cloned(&env, source_will_id, will_id, &owner);
@@ -1244,7 +1291,6 @@ impl WillContract {
             if beneficiaries.is_empty() || beneficiaries.len() > MAX_BENEFICIARIES {
                 panic_with_error!(&env, WillError::TooManyBeneficiaries);
             }
-            assert_valid_percentages(&env, &beneficiaries);
             assert_valid_guardians(&env, &owner, &guardians);
             assert_valid_periods(&env, checkin_period_days, grace_period_days);
             if !guardians.is_empty() {
@@ -1267,6 +1313,8 @@ impl WillContract {
                 let prev = balances.get(token_addr.clone()).unwrap_or(0);
                 balances.set(token_addr, prev + amount);
             }
+
+            assert_valid_allocations(&env, &beneficiaries, total_balance(&balances));
 
             let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
             for addr in guardians.iter() {
@@ -1311,7 +1359,7 @@ impl WillContract {
                 will_id,
                 &owner,
                 token_count,
-                beneficiaries_count,
+                &will.beneficiaries,
                 now + checkin_period_days * SECONDS_PER_DAY,
             );
 
@@ -1520,37 +1568,84 @@ fn names_address(beneficiaries: &Vec<Beneficiary>, address: &Address) -> bool {
         .any(|beneficiary| &beneficiary.address == address)
 }
 
-/// Asserts beneficiary basis points sum to exactly 10,000 and no beneficiary has zero percentage.
+/// Asserts a beneficiary list's allocations are internally consistent and
+/// affordable against `will_balance`:
 ///
-/// The per-entry upper bound is not enforced here (shares are `u32` and
-/// `MAX_BENEFICIARIES` is small enough that overflow is not a concern), but
-/// the exact-sum invariant is critical: it guarantees that every token
-/// balance is fully distributed with no dust left behind.
-///
-/// Each beneficiary must have a non-zero basis point allocation; zero-percentage
-/// entries waste a slot in the beneficiary list and indicate a client-side error.
-///
-/// The same address may not appear more than once: the beneficiary index only
-/// stores one entry per address, so a repeated address silently drops one of
-/// the split percentages rather than actually splitting the share, which is
-/// almost certainly a client-side mistake rather than intentional.
-fn assert_valid_percentages(env: &Env, beneficiaries: &Vec<Beneficiary>) {
-    let mut total: u32 = 0;
+/// - No address may appear more than once (the beneficiary index only stores
+///   one entry per address, so a repeat would silently drop one of the
+///   allocations rather than actually splitting the share).
+/// - Every `Allocation::Percentage` must be non-zero, and all percentage
+///   shares together must sum to exactly 10,000 basis points (100 % of
+///   whatever remains once fixed amounts are set aside) — this guarantees
+///   every token balance is fully distributed with no dust left behind.
+/// - Every `Allocation::FixedAmount` must be positive, and the sum of every
+///   fixed amount on the will must never exceed `will_balance` — otherwise
+///   `distribute` could not pay every fixed beneficiary in full.
+/// - A will made up entirely of `FixedAmount` beneficiaries (no percentage
+///   beneficiaries at all) must account for the *whole* balance, since
+///   nobody is left to receive a "remainder" split.
+fn assert_valid_allocations(env: &Env, beneficiaries: &Vec<Beneficiary>, will_balance: i128) {
+    let mut percentage_total: u32 = 0;
+    let mut fixed_total: i128 = 0;
+    let mut has_percentage = false;
+
     for i in 0..beneficiaries.len() {
         let beneficiary = beneficiaries.get_unchecked(i);
-        if beneficiary.basis_points == 0 {
-            panic_with_error!(env, WillError::InvalidPercentages);
+        match beneficiary.allocation {
+            Allocation::Percentage(bp) => {
+                if bp == 0 {
+                    panic_with_error!(env, WillError::InvalidPercentages);
+                }
+                total_checked_add(&mut percentage_total, bp, env);
+                has_percentage = true;
+            }
+            Allocation::FixedAmount(amount) => {
+                if amount <= 0 {
+                    panic_with_error!(env, WillError::InvalidPercentages);
+                }
+                fixed_total = fixed_total.saturating_add(amount);
+            }
         }
-        total += beneficiary.basis_points;
         for j in (i + 1)..beneficiaries.len() {
             if beneficiary.address == beneficiaries.get_unchecked(j).address {
                 panic_with_error!(env, WillError::DuplicateBeneficiary);
             }
         }
     }
-    if total != 10_000 {
-        panic_with_error!(env, WillError::InvalidPercentages);
+
+    if fixed_total > will_balance {
+        panic_with_error!(env, WillError::FixedAmountExceedsBalance);
     }
+    if has_percentage {
+        if percentage_total != 10_000 {
+            panic_with_error!(env, WillError::InvalidPercentages);
+        }
+    } else if fixed_total != will_balance {
+        panic_with_error!(env, WillError::FixedAmountExceedsBalance);
+    }
+}
+
+/// Adds `value` into `total`, panicking with `InvalidPercentages` on overflow
+/// instead of aborting — a `u32` overflow here would otherwise be reachable
+/// with adversarial basis-point inputs.
+fn total_checked_add(total: &mut u32, value: u32, env: &Env) {
+    *total = match total.checked_add(value) {
+        Some(sum) => sum,
+        None => panic_with_error!(env, WillError::InvalidPercentages),
+    };
+}
+
+/// Sums every token balance in `balances` into a single `i128`, saturating
+/// rather than overflowing. Used to validate `Allocation::FixedAmount`
+/// entries against "the will's balance" in the simplified single-balance
+/// sense described in the `Allocation` docs: a fixed amount is available
+/// against the combined value locked across all of a will's tokens.
+fn total_balance(balances: &Map<Address, i128>) -> i128 {
+    let mut total: i128 = 0;
+    for (_, amount) in balances.iter() {
+        total = total.saturating_add(amount);
+    }
+    total
 }
 
 /// Transfers funds using either native XLM or token contract depending on
@@ -1685,17 +1780,44 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
         }
 
         let mut shares: Vec<(Address, i128)> = Vec::new(env);
+
+        // Fixed-amount beneficiaries are paid first, capped at what is
+        // actually available so a misconfigured/under-funded token never
+        // aborts the whole distribution.
         let mut remaining = total;
-        for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
-            let share = if index as u32 == count - 1 {
-                remaining
-            } else {
-                let portion = total * (beneficiary.basis_points as i128) / 10_000;
-                remaining -= portion;
-                portion
-            };
-            shares.push_back((beneficiary.address.clone(), share));
+        for beneficiary in will.beneficiaries.iter() {
+            if let Allocation::FixedAmount(amount) = beneficiary.allocation {
+                let paid = amount.min(remaining);
+                remaining -= paid;
+                shares.push_back((beneficiary.address.clone(), paid));
+            }
         }
+
+        // Whatever remains is split among percentage-based beneficiaries,
+        // proportionally to their basis points; the final one absorbs the
+        // rounding remainder so no dust is left behind.
+        let mut percentage_count: u32 = 0;
+        for beneficiary in will.beneficiaries.iter() {
+            if let Allocation::Percentage(_) = beneficiary.allocation {
+                percentage_count += 1;
+            }
+        }
+        let mut percentage_index: u32 = 0;
+        let mut percentage_remaining = remaining;
+        for beneficiary in will.beneficiaries.iter() {
+            if let Allocation::Percentage(bp) = beneficiary.allocation {
+                percentage_index += 1;
+                let share = if percentage_index == percentage_count {
+                    percentage_remaining
+                } else {
+                    let portion = remaining * (bp as i128) / 10_000;
+                    percentage_remaining -= portion;
+                    portion
+                };
+                shares.push_back((beneficiary.address.clone(), share));
+            }
+        }
+
         transfer_plan.push_back((token_addr, shares));
     }
 
@@ -1822,25 +1944,41 @@ fn record_transition(
     storage::append_history(env, will_id, &transition);
 }
 
-/// Releases `amount` from the will proportionally across beneficiaries and
-/// deducts it from `will.balance`. Does NOT change the will's status or
-/// persist it — the caller is responsible for saving.
+/// Releases `amount` from the will proportionally across percentage-based
+/// beneficiaries and deducts it from `will.balance`. Does NOT change the
+/// will's status or persist it — the caller is responsible for saving.
+///
+/// Fixed-amount beneficiaries are intentionally excluded from tiered partial
+/// releases: a `FixedAmount` promise is only meaningful once, against the
+/// final full release, so paying a fraction of it early at each grace-tier
+/// milestone would either shortchange or double-pay them. They are always
+/// paid in full by `distribute` at the final release instead.
 fn distribute_tier(env: &Env, will: &mut Will, amount: i128) {
     let token_client = token::Client::new(env, &will.token);
     let contract_address = env.current_contract_address();
-    let count = will.beneficiaries.len();
 
+    let mut percentage_count: u32 = 0;
+    for beneficiary in will.beneficiaries.iter() {
+        if let Allocation::Percentage(_) = beneficiary.allocation {
+            percentage_count += 1;
+        }
+    }
+
+    let mut percentage_index: u32 = 0;
     let mut remaining = amount;
-    for (index, beneficiary) in will.beneficiaries.iter().enumerate() {
-        let share = if index as u32 == count - 1 {
-            remaining
-        } else {
-            let portion = amount * (beneficiary.basis_points as i128) / 10_000;
-            remaining -= portion;
-            portion
-        };
-        if share > 0 {
-            token_client.transfer(&contract_address, &beneficiary.address, &share);
+    for beneficiary in will.beneficiaries.iter() {
+        if let Allocation::Percentage(bp) = beneficiary.allocation {
+            percentage_index += 1;
+            let share = if percentage_index == percentage_count {
+                remaining
+            } else {
+                let portion = amount * (bp as i128) / 10_000;
+                remaining -= portion;
+                portion
+            };
+            if share > 0 {
+                token_client.transfer(&contract_address, &beneficiary.address, &share);
+            }
         }
     }
 
