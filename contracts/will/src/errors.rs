@@ -66,4 +66,7 @@ pub enum WillError {
     /// token interface (e.g. missing `decimals()`). Returned by `create_will`
     /// when a lightweight upfront probe of the token fails.
     InvalidToken = 21,
+    /// The `ids` slice passed to `get_wills` exceeds the maximum allowed
+    /// length. Cap the slice to at most `MAX_GET_WILLS_IDS` entries.
+    TooManyIds = 22,
 }

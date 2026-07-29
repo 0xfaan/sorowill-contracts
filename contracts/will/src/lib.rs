@@ -117,6 +117,11 @@ const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
 /// Maximum keeper bounty in basis points (100 bps = 1%).
 const MAX_KEEPER_BOUNTY_BPS: u32 = 100;
 
+/// Maximum number of will ids accepted by [`WillContract::get_wills`] in a
+/// single call. Bounding the slice prevents a caller from triggering
+/// unbounded storage reads in one transaction.
+const MAX_GET_WILLS_IDS: u32 = 20;
+
 #[contract]
 pub struct WillContract;
 
@@ -1063,6 +1068,53 @@ impl WillContract {
     /// Returns the full state of every will `beneficiary` is named in.
     pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
+        let mut wills = Vec::new(&env);
+        for id in ids.iter() {
+            if let Ok(will) = storage::load_will(&env, id) {
+                wills.push_back(will);
+            }
+        }
+        wills
+    }
+
+    /// Fetches a caller-chosen set of wills by their ids in a single call.
+    ///
+    /// This is useful for application dashboards that already know a handful
+    /// of relevant will ids (e.g. collected from prior events) and want a
+    /// fresh read of just those wills without re-deriving the owner/beneficiary
+    /// indexes.
+    ///
+    /// # Parameters
+    /// - `ids`: the list of will ids to fetch. Must not exceed
+    ///   [`MAX_GET_WILLS_IDS`] entries.
+    ///
+    /// # Returns
+    /// A `Vec<Will>` containing only the wills that exist. Any id that does
+    /// not map to a stored will is silently skipped (no panic). The result
+    /// preserves the input order, minus the missing ids.
+    ///
+    /// **Skipping vs. panicking:** the owner/beneficiary index functions
+    /// (`get_wills_by_owner`, `get_wills_by_beneficiary`) also skip missing
+    /// ids for the same reason — stale index entries can arise after a will
+    /// is cancelled or released. `get_wills` follows the same convention so
+    /// callers can safely pass any id without error-handling overhead.
+    ///
+    /// # Panics
+    /// - [`WillError::TooManyIds`] if `ids.len()` exceeds `MAX_GET_WILLS_IDS`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Fetch a specific set of will ids, including one that does not exist.
+    /// let wills = client.get_wills(&vec![&env, will_id_a, will_id_b, 9999_u64]);
+    ///
+    /// // Only the two real wills are returned; 9999 is silently skipped.
+    /// assert_eq!(wills.len(), 2);
+    /// ```
+    pub fn get_wills(env: Env, ids: Vec<u64>) -> Vec<Will> {
+        if ids.len() > MAX_GET_WILLS_IDS {
+            panic_with_error!(&env, WillError::TooManyIds);
+        }
         let mut wills = Vec::new(&env);
         for id in ids.iter() {
             if let Ok(will) = storage::load_will(&env, id) {

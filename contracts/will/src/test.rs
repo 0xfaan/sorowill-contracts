@@ -5552,3 +5552,73 @@ fn test_create_will_rejects_plain_account_as_token() {
     );
     assert_eq!(result, Err(Ok(WillError::InvalidToken.into())));
 }
+
+// ── Issue #2: get_wills batch query ──────────────────────────────────────────
+
+/// Fetching a mix of valid and invalid ids returns only the wills that exist,
+/// silently skipping ids that have no corresponding storage entry.
+#[test]
+fn test_get_wills_returns_existing_skips_missing() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id_a = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+    let will_id_b = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &1,
+        &None,
+    );
+
+    // Query both real ids plus one that does not exist.
+    let result = client.get_wills(&vec![&env, will_id_a, will_id_b, 9999_u64]);
+
+    // Only the two real wills must be returned.
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().id, will_id_a);
+    assert_eq!(result.get(1).unwrap().id, will_id_b);
+}
+
+/// An empty ids list returns an empty result without error.
+#[test]
+fn test_get_wills_empty_ids_returns_empty() {
+    let (env, client, _owner, _token, _token_address) = setup();
+    let result = client.get_wills(&vec![&env]);
+    assert_eq!(result.len(), 0);
+}
+
+/// Exceeding MAX_GET_WILLS_IDS (20) must return TooManyIds.
+#[test]
+fn test_get_wills_too_many_ids_rejected() {
+    let (env, client, _owner, _token, _token_address) = setup();
+
+    // Build a vec with 21 entries — one more than MAX_GET_WILLS_IDS.
+    let mut ids: SorobanVec<u64> = SorobanVec::new(&env);
+    for i in 0..=20_u64 {
+        ids.push_back(i);
+    }
+
+    let result = client.try_get_wills(&ids);
+    assert_eq!(result, Err(Ok(WillError::TooManyIds.into())));
+}
+
+/// Querying only non-existent ids returns an empty vec (all silently skipped).
+#[test]
+fn test_get_wills_all_missing_returns_empty() {
+    let (env, client, _owner, _token, _token_address) = setup();
+    let result = client.get_wills(&vec![&env, 100_u64, 200_u64, 300_u64]);
+    assert_eq!(result.len(), 0);
+}
