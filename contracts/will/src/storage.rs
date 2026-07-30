@@ -64,11 +64,26 @@ pub struct GuardianVoteRecord {
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
+///
+/// Also extends the contract instance's TTL on every call so the `NextWillId`
+/// counter — and all other instance-storage entries — stay live for at least
+/// [`LIFETIME_THRESHOLD`] more ledgers, with a bump to [`BUMP_AMOUNT`] when
+/// that threshold is crossed. These constants mirror the values used for every
+/// persistent-storage entry in the contract so the instance lifecycle is
+/// managed consistently with the rest of the on-chain state.
 pub fn next_will_id(env: &Env) -> u64 {
     let key = DataKey::NextWillId;
     let current: u64 = env.storage().instance().get(&key).unwrap_or(0);
     let next = current + 1;
     env.storage().instance().set(&key, &next);
+    // Keep the contract instance alive for as long as the longest-lived will
+    // it could ever serve. Without an explicit bump here, the instance TTL is
+    // only extended by whatever the platform applies automatically (if
+    // anything), whereas every other storage entry in this codebase bumps its
+    // own TTL. This call brings instance storage in line with that policy.
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
     next
 }
 
@@ -164,6 +179,13 @@ pub fn load_will(env: &Env, will_id: u64) -> Result<Will, WillError> {
 
 /// Adds `will_id` to the index list stored at `key`, if not already present.
 ///
+/// Enforces [`MAX_WILLS_PER_INDEX`]: if the list is already at the cap and
+/// `will_id` is not already in it, this panics with [`WillError::TooManyWills`]
+/// before any write happens. This prevents the serialised `Vec<u64>` from
+/// growing large enough to hit Soroban's per-entry size ceiling, which would
+/// cause a mid-`create_will` failure after the token transfer has already
+/// succeeded.
+///
 /// The write and the TTL bump are skipped when the id is already indexed: the
 /// resulting entry would be byte-for-byte identical, so paying to store it
 /// again buys nothing.
@@ -174,6 +196,9 @@ fn index_push(env: &Env, key: DataKey, will_id: u64) {
         .get(&key)
         .unwrap_or_else(|| Vec::new(env));
     if !ids.contains(will_id) {
+        if ids.len() >= MAX_WILLS_PER_INDEX {
+            panic_with_error!(env, WillError::TooManyWills);
+        }
         ids.push_back(will_id);
         env.storage().persistent().set(&key, &ids);
         env.storage()
@@ -442,6 +467,30 @@ pub fn paginate_ids(env: &Env, ids: &Vec<u64>, cursor: Option<u64>, limit: u32) 
     }
     result
 }
+
+/// Maximum number of will ids that a single address may have in its owner or
+/// beneficiary index vector (`OwnerWills` / `BeneficiaryWills`).
+///
+/// Soroban persistent ledger entries have an upper bound on their serialized
+/// size. An unbounded `Vec<u64>` index would eventually exceed that ceiling,
+/// causing the append to fail mid-`create_will` — after the token transfer has
+/// already succeeded — and permanently blocking any further creates for that
+/// address. Capping the vector well below the theoretical limit prevents that
+/// hard failure.
+///
+/// 1 000 entries × 8 bytes each = 8 KB of raw id data, comfortably inside
+/// Soroban's max entry size and large enough to accommodate any realistic
+/// on-chain use case.
+///
+/// When the cap is reached, [`WillError::TooManyWills`] is returned before the
+/// token transfer happens, so no funds are ever locked in an un-indexable will.
+#[cfg(not(test))]
+pub const MAX_WILLS_PER_INDEX: u32 = 1_000;
+
+/// Lowered cap used in unit tests so the limit can be exercised without
+/// creating thousands of wills.
+#[cfg(test)]
+pub const MAX_WILLS_PER_INDEX: u32 = 5;
 
 /// Maximum number of wills returned per page.
 pub const MAX_PAGE_SIZE: u32 = 50;
