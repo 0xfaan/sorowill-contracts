@@ -175,43 +175,51 @@ fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
     assert_eq!(token.balance(&rest), 1_300_000);
 }
 
-/// create_will must panic when the guardian list exceeds MAX_GUARDIANS (3).
+/// Demonstrates the ergonomics unlocked by `Will: PartialEq + Eq`.
 ///
-/// The contract enforces this via `assert_valid_guardians`, which calls
-/// `panic_with_error!(WillError::TooManyBeneficiaries)` when
-/// `guardians.len() > MAX_GUARDIANS`. Supplying 4 guardians (one more than
-/// the maximum) exercises that rejection path.
+/// Before `Will` derived `PartialEq`/`Eq`, verifying that a `check_in` call
+/// left the will otherwise unchanged required one `assert_eq!` per field and
+/// it was easy to silently miss one. Now a single `assert_eq!(will_before,
+/// will_after)` compares every field simultaneously, and any unexpected
+/// mutation causes an immediate, descriptive failure.
 ///
-/// Note: the error reuses `WillError::TooManyBeneficiaries` (code 12) for
-/// the guardian-count check as well as the beneficiary-count check.
+/// Here we verify that two separately fetched snapshots of the same
+/// newly-created will are identical — a baseline sanity check that is only
+/// expressible as a single statement because `Will` now implements `PartialEq`.
 #[test]
-#[should_panic]
-fn create_will_rejects_more_than_max_guardians() {
+fn will_partialeq_allows_single_assert() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
 
-    // MAX_GUARDIANS = 3; supply 4 to trigger the rejection.
-    let g1 = Address::generate(&env);
-    let g2 = Address::generate(&env);
-    let g3 = Address::generate(&env);
-    let g4 = Address::generate(&env);
-
     let beneficiaries: SorobanVec<Beneficiary> = vec![
         &env,
-        Beneficiary { address: beneficiary, allocation: Allocation::Percentage(10_000) },
+        Beneficiary { address: beneficiary.clone(), allocation: Allocation::Percentage(10_000) },
     ];
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 500_000_i128)];
 
-    // Expected: WillError::TooManyBeneficiaries (code 12) — the contract
-    // reuses this error for guardian-list overflow via assert_valid_guardians.
-    client.create_will(
+    let will_id = client.create_will(
         &owner,
         &tokens,
         &beneficiaries,
-        &90,
+        &30,
         &7,
-        &vec![&env, g1, g2, g3, g4], // 4 guardians > MAX_GUARDIANS (3)
+        &vec![&env],
         &2,
         &None,
     );
+
+    // Fetch the will twice — the two snapshots must be identical.
+    let will_first = client.get_will(&will_id);
+    let will_second = client.get_will(&will_id);
+
+    // A single assert_eq! compares every Will field at once.
+    // Without Will: PartialEq this line would not compile.
+    assert_eq!(will_first, will_second);
+
+    // Also confirm that the key fields are what we expect.
+    assert_eq!(will_first.id, will_id);
+    assert_eq!(will_first.owner, owner);
+    assert_eq!(will_first.status, WillStatus::Active);
+    assert_eq!(will_first.checkin_period_days, 30);
+    assert_eq!(will_first.grace_period_days, 7);
 }

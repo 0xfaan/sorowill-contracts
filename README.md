@@ -25,7 +25,7 @@ SoroWill is a trustless, on-chain inheritance protocol for Stellar Soroban. It l
 5. **Release.** If the grace period expires without an emergency check-in, anyone can call `release_inheritance`, which distributes the locked balance to every beneficiary proportionally, in one transaction.
 6. **Cancel anytime.** While the will is active, the owner can call `cancel_will` to withdraw the full balance.
 7. **Update beneficiaries.** While active, the owner can call `update_beneficiaries` to change who inherits and in what proportions.
-8. **Guardian override.** A will can name up to 3 guardians. Any 2 of them calling `guardian_trigger` force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive.
+8. **Guardian override.** A will can name up to 3 guardians. Any 2 of them calling `guardian_trigger` force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive. See [docs/adr/0001-guardian-threshold.md](./docs/adr/0001-guardian-threshold.md) for the rationale behind the 2-of-3 default, its known limitations, and how it relates to the proposed configurable M-of-N guardian feature.
 
 ## Tech Stack
 
@@ -49,8 +49,23 @@ cargo install --locked stellar-cli --features opt
 git clone https://github.com/SoroWill/sorowill-contracts.git
 cd sorowill-contracts
 cargo test
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
+
+### Task runner (recommended)
+
+This repo ships a [`justfile`](./justfile) with the exact commands CI runs, so you don't have to remember or copy them from this README. Install [`just`](https://github.com/casey/just#installation), then:
+
+```bash
+just --list    # see every available recipe
+just test      # cargo test --workspace
+just lint      # cargo clippy --all-targets -- -D warnings (CI's exact flags)
+just build     # cargo build --workspace --release --target wasm32v1-none
+just fmt       # cargo fmt --all
+just ci        # run everything CI runs, in order
+```
+
+If you don't have `just` installed, the raw `cargo` commands above work identically.
 
 ## Resource costs
 
@@ -85,6 +100,20 @@ cd fuzz && cargo +nightly fuzz run create_will
 See [docs/FUZZING.md](./docs/FUZZING.md) for the invariants that are checked,
 how to reproduce and minimise a crash, and how to add a target.
 
+## Contract Constants
+
+The following limits are defined as `pub const` in `lib.rs` and re-exported from the crate root. They are the canonical source of truth — off-chain tooling, test harnesses, and SDK integrations should import them directly rather than hardcoding duplicates that can silently drift out of sync.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MAX_BENEFICIARIES` | `10` | Maximum number of beneficiaries per will |
+| `MAX_GUARDIANS` | `3` | Maximum number of guardians per will |
+| `GUARDIAN_THRESHOLD` | `2` | Default number of guardian votes required to force an early release |
+
+```rust
+use will::{MAX_BENEFICIARIES, MAX_GUARDIANS, GUARDIAN_THRESHOLD};
+```
+
 ## Contract Functions
 
 | Function | Description | Parameters | Returns |
@@ -98,6 +127,8 @@ how to reproduce and minimise a crash, and how to add a target.
 | `update_beneficiaries` | Replaces the beneficiary list before the will is triggered | `will_id`, `owner`, `beneficiaries` | — |
 | `top_up` | Adds more of the token to an existing will | `will_id`, `owner`, `amount` | — |
 | `get_will` | Reads the full state of a will | `will_id` | `Will` |
+| `get_will_status` | Reads only a will's lifecycle status, without loading the rest of the struct | `will_id` | `WillStatus` |
+| `get_time_until_deadline` | Seconds until the will's next relevant deadline (check-in or grace period); negative if past due, `None` if not applicable to the current status | `will_id` | `Option<i64>` |
 | `get_wills_by_owner` | Lists every will owned by an address | `owner` | `Vec<Will>` |
 | `get_wills_by_beneficiary` | Lists every will an address is named in | `beneficiary` | `Vec<Will>` |
 | `guardian_trigger` | Casts a guardian vote; 2 of 3 forces an early release | `will_id`, `guardian` | — |
@@ -161,7 +192,7 @@ for the full update process.
 
 ## Testnet Deployment
 
-The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json), updated manually whenever a new version is deployed:
+The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json):
 
 ```json
 {
@@ -170,6 +201,20 @@ The deployed contract ID for Stellar Testnet is recorded in [`deployments/testne
   "deployedAt": "<ISO-8601 timestamp>"
 }
 ```
+
+Redeploying is automated via [`scripts/deploy-testnet.sh`](./scripts/deploy-testnet.sh), which builds the release wasm, deploys it with `stellar contract deploy`, and rewrites this file with the new contract id and timestamp:
+
+```bash
+# One-time: create and fund a testnet identity
+stellar keys generate deployer --network testnet --fund
+
+# Build, deploy, and record the result in deployments/testnet.json
+DEPLOY_IDENTITY=deployer ./scripts/deploy-testnet.sh
+```
+
+Requires `stellar-cli` (same version as [Local Setup](#local-setup)) and a funded testnet identity passed via `DEPLOY_IDENTITY`. `NETWORK` and `RPC_URL` are optional overrides — see the script header for details.
+
+After running it, review and commit the updated `deployments/testnet.json` on its own — see [CONTRIBUTING.md](./CONTRIBUTING.md#updating-deploymentstestnetjson-after-a-redeploy) for the full checklist. A scheduled CI job also checks daily that this file's contract id still matches the on-chain wasm, so a forgotten update won't drift silently — see [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml).
 
 ## Security Policy
 
