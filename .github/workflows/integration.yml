@@ -1,0 +1,42 @@
+name: Integration
+
+# Runs the real compiled .wasm artifact through `stellar contract invoke`
+# against a local Soroban network, unlike the Test workflow which only runs
+# the in-process soroban_sdk unit tests. This is slower (network spin-up,
+# docker pull, real transactions) so it's kept out of the fast per-PR path
+# and instead runs on pushes to main and on demand.
+#
+# See CONTRIBUTING.md#integration-tests for how to run this locally.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+  schedule:
+    # 05:00 UTC daily.
+    - cron: "0 5 * * *"
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt
+
+      - name: Run integration lifecycle test against real wasm artifact
+        run: bash ./scripts/integration_test.sh

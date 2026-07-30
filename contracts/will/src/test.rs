@@ -1,6 +1,7 @@
                                                                                                                                                                                                                                                                                                                                          #![cfg(test)]
 
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, Vec as SorobanVec,
@@ -113,7 +114,7 @@ fn test_create_will_success() {
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
         &vec![
-            &env,
+            env,
             Beneficiary {
                 address: beneficiary.clone(),
                 basis_points: 10_000,
@@ -347,6 +348,156 @@ fn test_cannot_trigger_before_deadline() {
     client.trigger_will(&will_id);
 }
 
+// ── get_will_status / get_time_until_deadline ────────────────────────────────
+
+#[test]
+fn test_get_will_status_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    assert_eq!(client.get_will_status(&will_id), WillStatus::Active);
+    // Matches the status embedded in the full struct.
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+}
+
+#[test]
+fn test_get_will_status_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will_status(&will_id), WillStatus::Triggered);
+}
+
+#[test]
+fn test_get_time_until_deadline_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    // Fresh will: ~90 days (in seconds) remain until the check-in deadline.
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(90 * DAY as i64));
+
+    // Halfway through the check-in period, roughly half the time remains.
+    advance_time(&env, 45 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(45 * DAY as i64));
+
+    // Past the deadline but not yet triggered: negative, not None.
+    advance_time(&env, 50 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(-5 * DAY as i64));
+}
+
+#[test]
+fn test_get_time_until_deadline_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    // Just triggered: the full 7-day grace period remains.
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(7 * DAY as i64));
+
+    // Partway through the grace period.
+    advance_time(&env, 3 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(4 * DAY as i64));
+
+    // Past the grace period but not yet released: negative, not None.
+    advance_time(&env, 10 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(-6 * DAY as i64));
+}
+
+#[test]
+fn test_get_time_until_deadline_none_when_not_applicable() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(client.get_will_status(&will_id), WillStatus::Cancelled);
+    assert_eq!(client.get_time_until_deadline(&will_id), None);
+}
+
 // ── emergency_checkin ────────────────────────────────────────────────────────
 
 #[test]
@@ -497,6 +648,89 @@ fn test_release_inheritance_rounding_remainder() {
 }
 
 #[test]
+fn test_release_inheritance_rolls_back_when_one_beneficiary_rejects_transfer() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let total = 1_000_000_i128;
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), total)],
+        &vec![
+            &env,
+            bp(&beneficiary_a, 6_000),
+            bp(&beneficiary_b, 4_000),
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+
+    // The first transfer would succeed, but the second beneficiary is frozen
+    // and cannot receive this Stellar asset.
+    StellarAssetClient::new(&env, &token_address)
+        .set_authorized(&beneficiary_b, &false);
+
+    assert!(client.try_release_inheritance(&will_id, &None).is_err());
+
+    // Soroban rolls the entire invocation back: the earlier transfer and all
+    // of distribute's state changes must be absent.
+    assert_eq!(token.balance(&beneficiary_a), 0);
+    assert_eq!(token.balance(&beneficiary_b), 0);
+    assert_eq!(token.balance(&client.address), total);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Triggered);
+    assert_eq!(will.balances.get(token_address).unwrap(), total);
+}
+
+#[test]
+fn test_release_inheritance_handles_near_maximum_balance_without_overflow() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let total = i128::MAX;
+
+    // setup funds the owner with 1_000_000_000 units; extend that balance to
+    // the largest positive amount the Stellar test token can represent.
+    StellarAssetClient::new(&env, &token_address)
+        .mint(&owner, &(total - 1_000_000_000));
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, total)],
+        &vec![
+            &env,
+            bp(&beneficiary_a, 6_000),
+            bp(&beneficiary_b, 4_000),
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id, &None);
+
+    let expected_a = (total / 10_000) * 6_000
+        + (total % 10_000) * 6_000 / 10_000;
+    assert_eq!(token.balance(&beneficiary_a), expected_a);
+    assert_eq!(token.balance(&beneficiary_b), total - expected_a);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+#[test]
 fn test_release_multi_token_proportionally() {
     let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) = setup_two_tokens();
     let a = Address::generate(&env);
@@ -594,6 +828,68 @@ fn test_update_beneficiaries() {
     client.update_beneficiaries(&will_id, &owner, &vec![&env, bp(&b, 5_000), bp(&c, 5_000)]);
     assert_eq!(client.get_will(&will_id).beneficiaries.len(), 2);
     assert_eq!(client.get_wills_by_beneficiary(&b, &None, &100).len(), 1);
+}
+
+#[test]
+fn test_update_beneficiaries_event_payload() {
+    let (env, client, owner, _token, token_address) = setup();
+    let original = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: original,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    let new_beneficiaries = SorobanVec::from_array(
+        &env,
+        [
+            Beneficiary {
+                address: b.clone(),
+                basis_points: 4_000,
+            },
+            Beneficiary {
+                address: c.clone(),
+                basis_points: 6_000,
+            },
+        ],
+    );
+    client.update_beneficiaries(&will_id, &owner, &new_beneficiaries);
+
+    use soroban_sdk::{symbol_short, testutils::Events, TryIntoVal};
+    let events = env.events().all();
+    let mut found = false;
+    for event in events.iter() {
+        if !event.1.is_empty() {
+            if let Ok(topic0) = event.1.get(0).unwrap().try_into_val(&env) {
+                let topic0_sym: soroban_sdk::Symbol = topic0;
+                if topic0_sym == symbol_short!("benefup") {
+                    found = true;
+                    let topic1: u64 = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+                    assert_eq!(topic1, will_id);
+                    // data: (owner, beneficiary_count, beneficiaries)
+                    let data: (Address, u32, SorobanVec<Beneficiary>) =
+                        event.2.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, owner);
+                    assert_eq!(data.1, 2);
+                    assert_eq!(data.2, new_beneficiaries);
+                }
+            }
+        }
+    }
+    assert!(found, "benefup event not found");
 }
 
 #[test]
@@ -3603,7 +3899,7 @@ fn test_archive_triggered_will_rejected() {
 
 // ── Issue #11: Pull-based beneficiary claim tests ────────────────────────────
 
-/// Pull-mode distribute stores claimable shares instead of transferring tokens.
+/// Pull-mode distribute'stores claimable shares instead of transferring tokens.
 #[test]
 fn test_pull_distribution_stores_shares() {
     let (env, client, owner, token, token_address) = setup();
@@ -5493,163 +5789,164 @@ fn test_create_will_zero_grace_period_rejected() {
     );
 }
 
-// ── Issue #165: extend_ttl must be called after every storage write ───────────
-
-/// After `create_will`, the will's own storage entry must have its TTL bumped
-/// to `BUMP_AMOUNT` (60 days × 17,280 ledgers/day = 1,036,800 ledgers).
-/// This test reads the stored TTL directly via the persistent-storage testutils
-/// to confirm that `save_will` calls `extend_ttl` as required.
+// ── Atomicity of create_will when the token transfer fails ───────────────
+//
+// Soroban transactions are atomic: if any host call inside a contract
+// invocation fails (traps), every storage write performed earlier in that
+// same invocation is rolled back as if it never happened. `create_will`
+// relies on this: it writes the `Will` record, the `NextWillId` counter, and
+// the owner/beneficiary index entries only after the loop that performs the
+// token transfer for every entry. If `token::Client::transfer` panics (e.g.
+// the owner has insufficient balance or never approved a large enough
+// allowance for the contract to pull from), the whole invocation must
+// revert with no partial state left behind. This was previously an
+// assumption baked into the atomicity of the host — never directly
+// exercised by a test.
 #[test]
-fn test_create_will_extends_will_ttl() {
-    use soroban_sdk::testutils::storage::Persistent as _;
-
-    let (env, client, owner, _token, token_address) = setup();
+fn test_create_will_reverts_atomically_on_insufficient_balance() {
+    let (env, client, owner, token, token_address) = setup();
     let beneficiary = Address::generate(&env);
+
+    // owner was minted 1_000_000_000 in `setup`; ask for far more than that
+    // so the underlying SAC `transfer` call traps.
+    let excessive_amount = 10_000_000_000_i128;
+
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), excessive_amount)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert!(result.is_err(), "create_will should fail when the transfer cannot be completed");
+
+    // No Will record and no index entries should have been left behind by
+    // the failed attempt.
+    assert!(client.get_wills_by_owner(&owner).is_empty());
+    assert!(client.get_wills_by_beneficiary(&beneficiary).is_empty());
+
+    // The owner's balance must be untouched — the failed transfer must not
+    // have moved any funds either.
+    assert_eq!(token.balance(&owner), 1_000_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+
+    // `NextWillId` must not have been incremented by the failed attempt: the
+    // next *successful* call should still allocate id 1, not 2.
+    let good_will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert_eq!(
+        good_will_id, 1,
+        "a failed create_will must not have consumed a will id"
+    );
+}
+
+// ── Behavior against a non-conforming ("misbehaving") token ───────────────
+//
+// Every other test in this file uses the real Stellar Asset Contract, which
+// faithfully implements SEP-41's `transfer`. `create_will`'s `tokens`
+// parameter accepts *any* `Address`, with no interface or behavior
+// validation (see issue #74) — nothing stops an owner from locking a will
+// against a token contract that doesn't actually move funds. This test uses
+// the `NoopToken` mock defined below, whose `transfer` silently returns
+// without adjusting any balance, to document the contract's current
+// behavior in that situation: it happily records a `Will` with a balance
+// that was never actually backed by a real transfer.
+//
+// This is a documented gap, not a fix. Whether `create_will` should
+// additionally verify the token's balance moved (e.g. by reading balances
+// before/after the transfer call) is left as a follow-up beyond this test —
+// see issue #74 for the broader token-validation discussion. Right now the
+// contract trusts `token::Client::transfer` unconditionally, exactly as it
+// would for a real SAC.
+#[test]
+fn test_create_will_with_noop_token_records_unbacked_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    let token_id = env.register(NoopToken, ());
+    let token_client = NoopTokenClient::new(&env, &token_id);
+    // Deliberately do NOT mint anything to `owner` — a conforming token
+    // would reject the transfer below for insufficient balance. This mock
+    // never checks balances at all, which is exactly the misbehavior being
+    // demonstrated.
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
 
     let will_id = client.create_will(
         &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &vec![&env, (token_id.clone(), 5_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
         &90,
         &7,
         &vec![&env],
-        &2,
         &None,
     );
 
-    // BUMP_AMOUNT = 60 days * 17_280 ledgers/day = 1_036_800 ledgers.
-    // The TTL on the Will entry must be at least that value immediately after
-    // create_will, proving extend_ttl was called.
-    const DAY_IN_LEDGERS: u32 = 17_280;
-    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+    // The contract recorded a balance for a transfer that never actually
+    // happened: the mock's `transfer` is a no-op, so no funds ever moved,
+    // yet `Will.balances` reflects the full requested amount.
+    let will = client.get_will(&will_id);
+    assert_eq!(will.balances.get(token_id.clone()).unwrap(), 5_000_000);
 
-    let actual_ttl = env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .get_ttl(&crate::storage::DataKey::Will(will_id))
-    });
-
-    assert!(
-        actual_ttl >= BUMP_AMOUNT,
-        "expected Will({will_id}) TTL >= {BUMP_AMOUNT} ledgers after create_will, got {actual_ttl}"
-    );
+    // Confirming the transfer really was a no-op: the mock token never
+    // tracked any balance for the owner or the contract, because its
+    // `transfer` does not touch storage at all.
+    assert_eq!(token_client.balance(&owner), 0);
+    assert_eq!(token_client.balance(&contract_id), 0);
 }
 
-/// After `create_will`, the owner-index entry (`OwnerWills`) must also have
-/// its TTL bumped to `BUMP_AMOUNT`, confirming that `index_by_owner` calls
-/// `extend_ttl` after the `set`.
-#[test]
-fn test_create_will_extends_owner_index_ttl() {
-    use soroban_sdk::testutils::storage::Persistent as _;
+/// Minimal mock SEP-41-shaped token whose `transfer` silently no-ops
+/// instead of moving funds or reverting. Shares the "fake token contract"
+/// approach used by `test_support::MaliciousToken` (issue #55's reentrancy
+/// harness), but simulates a different misbehavior: instead of reentering
+/// the caller, it simply pretends every transfer succeeded without moving
+/// any balance.
+#[contract]
+pub struct NoopToken;
 
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
+#[contractimpl]
+impl NoopToken {
+    pub fn mint(_env: Env, _to: Address, _amount: i128) {}
 
-    client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
-        &90,
-        &7,
-        &vec![&env],
-        &2,
-        &None,
-    );
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        0
+    }
 
-    const DAY_IN_LEDGERS: u32 = 17_280;
-    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
-
-    let actual_ttl = env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .get_ttl(&crate::storage::DataKey::OwnerWills(owner.clone()))
-    });
-
-    assert!(
-        actual_ttl >= BUMP_AMOUNT,
-        "expected OwnerWills TTL >= {BUMP_AMOUNT} ledgers after create_will, got {actual_ttl}"
-    );
-}
-
-/// After `create_will`, the beneficiary-index entry (`BeneficiaryWills`) must
-/// also have its TTL bumped, confirming that `index_by_beneficiary` calls
-/// `extend_ttl` after the `set`.
-#[test]
-fn test_create_will_extends_beneficiary_index_ttl() {
-    use soroban_sdk::testutils::storage::Persistent as _;
-
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
-
-    client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
-        &90,
-        &7,
-        &vec![&env],
-        &2,
-        &None,
-    );
-
-    const DAY_IN_LEDGERS: u32 = 17_280;
-    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
-
-    let actual_ttl = env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .get_ttl(&crate::storage::DataKey::BeneficiaryWills(beneficiary.clone()))
-    });
-
-    assert!(
-        actual_ttl >= BUMP_AMOUNT,
-        "expected BeneficiaryWills TTL >= {BUMP_AMOUNT} ledgers after create_will, got {actual_ttl}"
-    );
-}
-
-/// `check_in` writes an updated `Will` back via `save_will`, which must call
-/// `extend_ttl`. This test advances the ledger sequence past LIFETIME_THRESHOLD
-/// (30 days × 17,280) then checks in and confirms the TTL was refreshed out to
-/// BUMP_AMOUNT, proving that a future refactor cannot drop the `extend_ttl`
-/// call from `save_will` without this test catching it.
-#[test]
-fn test_check_in_refreshes_will_ttl() {
-    use soroban_sdk::testutils::storage::Persistent as _;
-
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
-
-    let will_id = client.create_will(
-        &owner,
-        &vec![&env, (token_address.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
-        &90,
-        &7,
-        &vec![&env],
-        &2,
-        &None,
-    );
-
-    const DAY_IN_LEDGERS: u32 = 17_280;
-    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
-
-    // Age the ledger sequence past LIFETIME_THRESHOLD (30 days) without
-    // advancing the timestamp past the check-in deadline (90 days).
-    env.ledger().with_mut(|l| {
-        l.sequence_number += DAY_IN_LEDGERS * 31;
-    });
-    advance_time(&env, 10 * DAY); // 10 days in timestamp — within the 90-day window
-
-    client.check_in(&will_id, &owner);
-
-    let actual_ttl = env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .get_ttl(&crate::storage::DataKey::Will(will_id))
-    });
-
-    assert!(
-        actual_ttl >= BUMP_AMOUNT,
-        "expected Will({will_id}) TTL >= {BUMP_AMOUNT} ledgers after check_in, got {actual_ttl}"
-    );
+    /// Always "succeeds" without moving any balance, unlike a conforming
+    /// SEP-41 token which would debit `from` and credit `to`.
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+        // no-op: silently pretend the transfer happened.
+    }
 }

@@ -1,0 +1,74 @@
+name: Testnet Deployment Drift Check
+
+# deployments/testnet.json records the contract id integrators (the SDK,
+# the app) use to reach the live testnet contract, and is only ever updated
+# by hand (or by running scripts/deploy-testnet.sh) — nothing enforces that
+# it stays in sync with what's actually on-chain. This job fetches the
+# on-chain wasm for the recorded contract id and compares its hash against
+# the wasm built from the currently-committed source, so a stale or
+# forgotten update fails loudly instead of silently pointing integrators at
+# an outdated contract. Runs on a schedule (not per-PR) since it depends on
+# external network state rather than anything in a given diff.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli --features opt
+
+      - name: Read recorded contract id
+        id: recorded
+        run: |
+          CONTRACT_ID=$(jq -r '.WillContract' deployments/testnet.json)
+          if [[ -z "$CONTRACT_ID" || "$CONTRACT_ID" == "null" ]]; then
+            echo "::warning::deployments/testnet.json has no WillContract id recorded yet; skipping drift check."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "contract_id=$CONTRACT_ID" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build contract from current source
+        if: steps.recorded.outputs.skip == 'false'
+        run: cargo build --package will --release --target wasm32v1-none
+
+      - name: Fetch on-chain wasm
+        if: steps.recorded.outputs.skip == 'false'
+        env:
+          CONTRACT_ID: ${{ steps.recorded.outputs.contract_id }}
+        run: |
+          stellar contract fetch \
+            --id "$CONTRACT_ID" \
+            --network testnet \
+            --rpc-url https://soroban-testnet.stellar.org \
+            --out-file /tmp/onchain.wasm
+
+      - name: Compare on-chain hash against committed source
+        if: steps.recorded.outputs.skip == 'false'
+        env:
+          CONTRACT_ID: ${{ steps.recorded.outputs.contract_id }}
+        run: |
+          LOCAL_HASH=$(sha256sum target/wasm32v1-none/release/will.wasm | awk '{print $1}')
+          ONCHAIN_HASH=$(sha256sum /tmp/onchain.wasm | awk '{print $1}')
+
+          echo "Locally built wasm hash: $LOCAL_HASH"
+          echo "On-chain wasm hash:      $ONCHAIN_HASH"
+
+          if [[ "$LOCAL_HASH" != "$ONCHAIN_HASH" ]]; then
+            echo "::error::deployments/testnet.json contract id $CONTRACT_ID is stale — its on-chain wasm hash ($ONCHAIN_HASH) does not match the wasm built from the currently-committed source ($LOCAL_HASH). Redeploy with scripts/deploy-testnet.sh and update deployments/testnet.json (see CONTRIBUTING.md)."
+            exit 1
+          fi
+
+          echo "OK: on-chain contract matches committed source."

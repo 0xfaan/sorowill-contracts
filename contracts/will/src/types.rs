@@ -1,17 +1,35 @@
 use soroban_sdk::{contracttype, Address, Symbol, Vec};
 use soroban_sdk::{contracttype, Address, Map, Vec};
 
-/// A single beneficiary entry: an address and the share of the will's balance
-/// it is entitled to receive when the inheritance is released, expressed in
-/// basis points (1 bp = 0.01 %).
+/// How a beneficiary's share of a will is calculated.
 ///
-/// `basis_points` across all beneficiaries of a will must sum to exactly
-/// 10,000 (i.e. 100 %).
+/// - `Percentage(bp)` is a share expressed in basis points (1 bp = 0.01 %) of
+///   whatever balance remains *after* every `FixedAmount` beneficiary on the
+///   same will has been paid. All `Percentage` shares on a will must sum to
+///   exactly 10,000 (100 % of the remainder).
+/// - `FixedAmount(amount)` entitles the beneficiary to exactly `amount` of
+///   the will's token, paid before any percentage-based split is computed.
+///   The sum of all `FixedAmount` entries on a will can never exceed the
+///   will's balance (enforced by `assert_valid_allocations`).
+///
+/// A single will may mix both kinds: e.g. one beneficiary with a fixed
+/// amount and the rest splitting the remainder by percentage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Allocation {
+    Percentage(u32),
+    FixedAmount(i128),
+}
+
+/// A single beneficiary entry: an address and how much of the will's balance
+/// it is entitled to receive when the inheritance is released.
+///
+/// See [`Allocation`] for how `allocation` is interpreted and validated.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Beneficiary {
     pub address: Address,
-    pub basis_points: u32,
+    pub allocation: Allocation,
 }
 
 /// A guardian entry: an address paired with a vote weight.
@@ -23,6 +41,23 @@ pub struct Beneficiary {
 pub struct Guardian {
     pub address: Address,
     pub weight: u32,
+}
+
+/// A privacy-preserving beneficiary entry (issue #46).
+///
+/// Instead of a raw address the owner stores a SHA-256 commitment hash of the
+/// pre-image `<address_bytes> || <salt_bytes>`. At claim time the beneficiary
+/// calls `reveal_and_claim` with the pre-image; the contract verifies the hash
+/// matches and pays out to the revealed address.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HashedBeneficiary {
+    /// SHA-256 hash of the pre-image (address bytes concatenated with salt).
+    pub commitment: Bytes,
+    /// Percentage of the will's balance this beneficiary receives.
+    pub percentage: u32,
+    /// Whether this hashed beneficiary has already been claimed.
+    pub claimed: bool,
 }
 
 /// Lifecycle state of a will.
@@ -45,6 +80,10 @@ pub struct Guardian {
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WillStatus {
+    /// The will has just been created and is waiting for the owner to confirm
+    /// it within the confirmation window (issue #43). No check-in clock runs
+    /// while a will is in this state.
+    PendingConfirmation,
     /// The will is funded and the owner is checking in on schedule.
     Active,
     /// The owner missed a check-in deadline; the grace period is running.
@@ -116,7 +155,8 @@ pub struct ClaimableShare {
 pub struct Will {
     /// Unique, monotonically increasing identifier for this will.
     pub id: u64,
-    /// The address that created and funds the will.
+    /// The primary owner address. Used for backwards-compatible single-owner
+    /// flows and as the refund destination on cancellation.
     pub owner: Address,
     /// The token contract address (e.g. a USDC Stellar Asset Contract, or the
     /// native XLM asset address when `is_native` is true) held by the will.
@@ -134,6 +174,9 @@ pub struct Will {
     pub balance: i128,
     /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
+    /// Privacy-preserving beneficiaries registered by commitment hash (issue #46).
+    /// Their percentages count towards the 100-sum together with `beneficiaries`.
+    pub hashed_beneficiaries: Vec<HashedBeneficiary>,
     /// How many days the owner may go without checking in before the will
     /// can be triggered.
     pub checkin_period_days: u64,
@@ -144,6 +187,10 @@ pub struct Will {
     pub last_checkin: u64,
     /// Unix timestamp (seconds) at which the will was triggered, if any.
     pub trigger_time: Option<u64>,
+    /// Unix timestamp (seconds) by which the owner must call `confirm_will`
+    /// to move from `PendingConfirmation` to `Active` (issue #43).
+    /// `None` once the will is confirmed or if no delay was requested.
+    pub confirmation_deadline: Option<u64>,
     /// Current lifecycle state of the will.
     pub status: WillStatus,
     /// Optional guardians (up to 3) who may force an early release
@@ -155,6 +202,12 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Accumulated weight of guardian votes cast toward cancelling the current
+    /// trigger. Reaches quorum at `guardian_threshold`, returning the will to
+    /// `Active` and resetting the check-in deadline.
+    pub guardian_cancel_vote_weight: u32,
+    /// Number of distinct guardians who have voted to cancel the current trigger.
+    pub guardian_cancel_votes: u32,
     /// Number of distinct guardian votes required to force an early release.
     /// Must be between 1 and `guardians.len()`.
     pub guardian_threshold: u32,
