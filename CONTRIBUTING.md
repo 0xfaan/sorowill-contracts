@@ -22,31 +22,120 @@ For example: `feat/42-guardian-quorum-check` or `fix/17-checkin-deadline-roundin
 ## Pull requests
 
 - Your PR description must reference the issue it resolves (e.g. `Closes #42`).
-- Make sure `cargo test` and `cargo clippy --all-targets` both pass cleanly before requesting review.
+- Complete the [Before opening a PR](#before-opening-a-pr) checklist before requesting review.
 - Add or update unit tests for any behavior change in `contracts/will/src/test.rs`.
 - If you change validation rules or add an entry point, extend the fuzzing
   harness too — see [docs/FUZZING.md](./docs/FUZZING.md#adding-a-target).
+- If your PR changes contract behavior (new entrypoint, validation change,
+  event/error schema change, etc.), add an entry under `[Unreleased]` in
+  [CHANGELOG.md](./CHANGELOG.md) describing it in the "Added" / "Changed" /
+  "Fixed" section that fits. Pure docs/tooling/test-only PRs don't need one.
+- If your PR adds a new `WillError` variant, add a row for it to the
+  [error code table in the README](./README.md#error-codes) in the same PR —
+  don't let the table and `contracts/will/src/errors.rs` drift apart.
+- If your PR changes a public entry-point signature or a shared type
+  (`Will`, `Beneficiary`, `Guardian`, `WillStatus`, `WillError`, ...), bump
+  the crate `version` in `contracts/will/Cargo.toml` and regenerate the
+  contract spec artifact — see [spec/README.md](./spec/README.md).
+
+## Before opening a PR
+
+Run every command used by the [Test CI workflow](./.github/workflows/test.yml) and confirm it succeeds:
+
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
+- [ ] `cargo build --workspace --release --target wasm32v1-none`
+- [ ] Confirm the Test workflow is green on the PR.
 
 ## Local setup
 
 See the [README](./README.md#local-setup) for toolchain installation and how to run the test suite.
 
-## Handling a flagged security advisory
+## Mutation testing (cargo-mutants)
 
-The [Security Audit](.github/workflows/audit.yml) workflow runs `cargo audit` against `Cargo.lock` on every PR, on every push to `main`, and once a day on a schedule so newly published advisories against dependencies already in the lockfile are caught too. If it fails:
+Code coverage alone can't tell you whether an assertion is too weak or an
+edge case is missing — it only tells you a line ran, not that a test would
+notice if the logic on that line broke. [`cargo-mutants`](https://mutants.rs/)
+closes that gap: it systematically rewrites small pieces of the contract
+(flipping a comparison, changing a constant, swapping a boolean) and reruns
+the test suite against each mutant. A mutant that **survives** (tests still
+pass) means no test would have caught that bug.
 
-1. **Prefer upgrading.** Run `cargo update -p <crate>` (or bump the version in `Cargo.toml`/`contracts/will/Cargo.toml` if the fix needs a semver-major release), then confirm `cargo test` and `cargo clippy --all-targets -- -D warnings` still pass.
-2. **If no fix is available yet**, and you've confirmed the advisory doesn't apply to how this contract actually uses the crate (for example, the vulnerable code path is never reachable from the `no_std` wasm build), add the RUSTSEC id to the `ignore` list in [`audit.toml`](./audit.toml) with a comment explaining the justification and, if known, a tracking issue for the real fix. Never add an entry without a comment.
-3. Re-run `cargo audit --file Cargo.lock --deny warnings` locally (or `just audit`) to confirm the workflow will pass before opening the PR.
+CI runs mutation testing automatically via `.github/workflows/mutants.yml`
+on every push and PR to `main`, but it is currently **advisory only**
+(`continue-on-error: true`) — a survived mutant does not fail the build. It
+will graduate to a blocking check once we've triaged an initial baseline
+and trust the signal.
 
-## Updating deployments/testnet.json after a redeploy
+### Running it locally
 
-`deployments/testnet.json` is the source of truth integrators (the SDK, the app) use to find the live testnet contract, so keep it accurate:
+```sh
+cargo install cargo-mutants --locked
+cargo mutants --package will
+```
 
-1. Run `DEPLOY_IDENTITY=<your funded identity> ./scripts/deploy-testnet.sh` from the repo root (see [README.md#testnet-deployment](./README.md#testnet-deployment)). It builds the contract, deploys it, and overwrites `deployments/testnet.json` with the new contract id and an ISO-8601 timestamp.
-2. Review the diff (`git diff -- deployments/testnet.json`) before committing — a routine redeploy should only ever change `WillContract` and `deployedAt`, never `network`.
-3. Commit the updated file on its own, with a message that includes the new contract id, e.g. `chore: record testnet deployment CABC...`.
-4. The scheduled [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml) workflow compares the on-chain wasm hash for the recorded contract id against the wasm built from `main` once a day. If you forget to update this file after a redeploy, that job fails loudly instead of letting the recorded id silently drift from what's actually on-chain.
+This takes a while: cargo-mutants recompiles and reruns the test suite once
+per candidate mutation. To scope a run while iterating on a single file:
+
+```sh
+cargo mutants --package will --file contracts/will/src/storage.rs
+```
+
+Results are written to `mutants.out/` (or wherever `--output` points) as
+both a human-readable summary and a machine-readable list of mutants,
+grouped as `caught`, `missed` (survived), `unviable` (didn't compile), and
+`timeout`.
+
+### Interpreting a "survived mutant" result
+
+A survived mutant is a pointer at an *untested behavior*, not necessarily a
+real bug. For each one:
+
+1. Look at the diff cargo-mutants applied (e.g. `<` became `<=`, or a
+   returned value was replaced with a constant).
+2. Ask: is there a code path where this mutation would produce an
+   observably different result? If yes, the test suite is missing an
+   assertion or a test case for that path — add one.
+3. If the mutated code is genuinely unreachable or provably
+   behavior-preserving (rare, but happens with defensive/redundant checks),
+   it's fine to leave as a known, documented survivor rather than write a
+   test purely to satisfy the tool.
+
+New survivors introduced by a PR should be fixed by adding or strengthening
+a test in `contracts/will/src/test.rs` before merge, once the check is
+blocking; until then, treat a growing survivor count as a signal to
+prioritize test-writing, and file a follow-up issue for anything
+out of scope for the PR at hand.
+
+## Code coverage (cargo-llvm-cov)
+
+CI measures code coverage via `.github/workflows/coverage.yml` using
+[`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov), which works
+well for `no_std`/Soroban crates because it runs against the host target —
+the test suite doesn't need to run under `wasm32v1-none` for coverage to be
+meaningful, only the release wasm build in `test.yml` does.
+
+The workflow enforces a baseline threshold of **60% line coverage**,
+chosen because the current suite already clears it comfortably. The goal
+is a meaningful floor against large regressions (e.g. a new entry point
+shipped with no tests), not a hard gate that blocks unrelated PRs over
+small, incidental dips. Raise the threshold over time as coverage improves.
+
+### Running it locally
+
+```sh
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+
+# Terminal summary
+cargo llvm-cov --workspace
+
+# lcov report (for editor integrations, e.g. VS Code's "Coverage Gutters")
+cargo llvm-cov --workspace --lcov --output-path lcov.info
+
+# Browsable HTML report
+cargo llvm-cov --workspace --html --open
+```
 
 ## Learn more
 
