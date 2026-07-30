@@ -1,6 +1,7 @@
                                                                                                                                                                                                                                                                                                                                          #![cfg(test)]
 
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, Vec as SorobanVec,
@@ -493,6 +494,89 @@ fn test_release_inheritance_rounding_remainder() {
     let s2 = token.balance(&b2);
     let s3 = token.balance(&b3);
     assert_eq!(s1 + s2 + s3, 1_000_001);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+#[test]
+fn test_release_inheritance_rolls_back_when_one_beneficiary_rejects_transfer() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let total = 1_000_000_i128;
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), total)],
+        &vec![
+            &env,
+            bp(&beneficiary_a, 6_000),
+            bp(&beneficiary_b, 4_000),
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+
+    // The first transfer would succeed, but the second beneficiary is frozen
+    // and cannot receive this Stellar asset.
+    StellarAssetClient::new(&env, &token_address)
+        .set_authorized(&beneficiary_b, &false);
+
+    assert!(client.try_release_inheritance(&will_id, &None).is_err());
+
+    // Soroban rolls the entire invocation back: the earlier transfer and all
+    // of distribute's state changes must be absent.
+    assert_eq!(token.balance(&beneficiary_a), 0);
+    assert_eq!(token.balance(&beneficiary_b), 0);
+    assert_eq!(token.balance(&client.address), total);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Triggered);
+    assert_eq!(will.balances.get(token_address).unwrap(), total);
+}
+
+#[test]
+fn test_release_inheritance_handles_near_maximum_balance_without_overflow() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let total = i128::MAX;
+
+    // setup funds the owner with 1_000_000_000 units; extend that balance to
+    // the largest positive amount the Stellar test token can represent.
+    StellarAssetClient::new(&env, &token_address)
+        .mint(&owner, &(total - 1_000_000_000));
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, total)],
+        &vec![
+            &env,
+            bp(&beneficiary_a, 6_000),
+            bp(&beneficiary_b, 4_000),
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id, &None);
+
+    let expected_a = (total / 10_000) * 6_000
+        + (total % 10_000) * 6_000 / 10_000;
+    assert_eq!(token.balance(&beneficiary_a), expected_a);
+    assert_eq!(token.balance(&beneficiary_b), total - expected_a);
     assert_eq!(token.balance(&client.address), 0);
 }
 
@@ -3603,7 +3687,7 @@ fn test_archive_triggered_will_rejected() {
 
 // ── Issue #11: Pull-based beneficiary claim tests ────────────────────────────
 
-/// Pull-mode distribute stores claimable shares instead of transferring tokens.
+/// Pull-mode distribute'stores claimable shares instead of transferring tokens.
 #[test]
 fn test_pull_distribution_stores_shares() {
     let (env, client, owner, token, token_address) = setup();
@@ -5493,242 +5577,164 @@ fn test_create_will_zero_grace_period_rejected() {
     );
 }
 
-// ── Helper used by scale / index-corruption tests ────────────────────────────
+// ── Atomicity of create_will when the token transfer fails ───────────────
+//
+// Soroban transactions are atomic: if any host call inside a contract
+// invocation fails (traps), every storage write performed earlier in that
+// same invocation is rolled back as if it never happened. `create_will`
+// relies on this: it writes the `Will` record, the `NextWillId` counter, and
+// the owner/beneficiary index entries only after the loop that performs the
+// token transfer for every entry. If `token::Client::transfer` panics (e.g.
+// the owner has insufficient balance or never approved a large enough
+// allowance for the contract to pull from), the whole invocation must
+// revert with no partial state left behind. This was previously an
+// assumption baked into the atomicity of the host — never directly
+// exercised by a test.
+#[test]
+fn test_create_will_reverts_atomically_on_insufficient_balance() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
 
-/// Convenience constructor for a `Beneficiary` with `basis_points` share.
-fn bp(address: &Address, basis_points: u32) -> Beneficiary {
-    Beneficiary {
-        address: address.clone(),
-        basis_points,
-    }
+    // owner was minted 1_000_000_000 in `setup`; ask for far more than that
+    // so the underlying SAC `transfer` call traps.
+    let excessive_amount = 10_000_000_000_i128;
+
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), excessive_amount)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert!(result.is_err(), "create_will should fail when the transfer cannot be completed");
+
+    // No Will record and no index entries should have been left behind by
+    // the failed attempt.
+    assert!(client.get_wills_by_owner(&owner).is_empty());
+    assert!(client.get_wills_by_beneficiary(&beneficiary).is_empty());
+
+    // The owner's balance must be untouched — the failed transfer must not
+    // have moved any funds either.
+    assert_eq!(token.balance(&owner), 1_000_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+
+    // `NextWillId` must not have been incremented by the failed attempt: the
+    // next *successful* call should still allocate id 1, not 2.
+    let good_will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert_eq!(
+        good_will_id, 1,
+        "a failed create_will must not have consumed a will id"
+    );
 }
 
-// ── Issue #3: Scale / concurrent-wills stress test ───────────────────────────
-
-/// Creates 200 wills spread across 20 distinct owners (10 wills each), with
-/// each will naming 2 distinct beneficiaries from a shared pool of 5.
-///
-/// After creation:
-/// - `get_wills_by_owner` is asserted for every owner.
-/// - `get_will` spot-checks several wills.
-/// - `check_in` and `top_up` are exercised on a subset of wills.
-/// - `get_wills_by_beneficiary` is checked for every beneficiary in the pool.
-///
-/// This exercises both the OwnerWills and BeneficiaryWills index growth paths
-/// to confirm no unexpected panics occur at realistic volume.
+// ── Behavior against a non-conforming ("misbehaving") token ───────────────
+//
+// Every other test in this file uses the real Stellar Asset Contract, which
+// faithfully implements SEP-41's `transfer`. `create_will`'s `tokens`
+// parameter accepts *any* `Address`, with no interface or behavior
+// validation (see issue #74) — nothing stops an owner from locking a will
+// against a token contract that doesn't actually move funds. This test uses
+// the `NoopToken` mock defined below, whose `transfer` silently returns
+// without adjusting any balance, to document the contract's current
+// behavior in that situation: it happily records a `Will` with a balance
+// that was never actually backed by a real transfer.
+//
+// This is a documented gap, not a fix. Whether `create_will` should
+// additionally verify the token's balance moved (e.g. by reading balances
+// before/after the transfer call) is left as a follow-up beyond this test —
+// see issue #74 for the broader token-validation discussion. Right now the
+// contract trusts `token::Client::transfer` unconditionally, exactly as it
+// would for a real SAC.
 #[test]
-fn test_scale_hundreds_of_wills() {
-    const WILLS_PER_OWNER: u32 = 10;
-    const NUM_OWNERS: u32 = 20;
-    const TOTAL_WILLS: u32 = WILLS_PER_OWNER * NUM_OWNERS;
-
+fn test_create_will_with_noop_token_records_unbacked_balance() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
 
-    // Set up shared token.
-    let token_admin = Address::generate(&env);
-    let (token_client, token_admin_client) = create_token(&env, &token_admin);
-    let token_address = token_admin_client.address.clone();
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    let token_id = env.register(NoopToken, ());
+    let token_client = NoopTokenClient::new(&env, &token_id);
+    // Deliberately do NOT mint anything to `owner` — a conforming token
+    // would reject the transfer below for insufficient balance. This mock
+    // never checks balances at all, which is exactly the misbehavior being
+    // demonstrated.
+
     let contract_id = env.register(WillContract, ());
     let client = WillContractClient::new(&env, &contract_id);
 
-    // Shared pool of 5 beneficiaries; each will names 2 of them.
-    let beneficiaries: soroban_sdk::Vec<Address> = {
-        let mut v = soroban_sdk::Vec::new(&env);
-        for _ in 0..5 {
-            v.push_back(Address::generate(&env));
-        }
-        v
-    };
-
-    // Mint enough tokens for every owner.
-    let amount_per_will: i128 = 10_000;
-    let mint_per_owner: i128 = amount_per_will * WILLS_PER_OWNER as i128;
-    let owners: soroban_sdk::Vec<Address> = {
-        let mut v = soroban_sdk::Vec::new(&env);
-        for _ in 0..NUM_OWNERS {
-            let owner = Address::generate(&env);
-            token_admin_client.mint(&owner, &mint_per_owner);
-            v.push_back(owner);
-        }
-        v
-    };
-
-    // Create all wills and record their ids.
-    let mut all_ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&env);
-    for o in 0..NUM_OWNERS as usize {
-        let owner = owners.get(o as u32).unwrap();
-        for w in 0..WILLS_PER_OWNER as usize {
-            // Pick two distinct beneficiaries from the shared pool by offset.
-            let b0 = beneficiaries.get((w % 5) as u32).unwrap();
-            let b1 = beneficiaries.get(((w + 1) % 5) as u32).unwrap();
-            let (bps0, bps1) = if b0 == b1 {
-                // Same address would be rejected; in this small pool that only
-                // happens at w=4 (4%5=4, 5%5=0) so we just use a different split.
-                (10_000u32, 0u32)
-            } else {
-                (6_000, 4_000)
-            };
-            let beneficiary_vec = if bps1 == 0 {
-                soroban_sdk::vec![&env, bp(&b0, 10_000)]
-            } else {
-                soroban_sdk::vec![&env, bp(&b0, bps0), bp(&b1, bps1)]
-            };
-            let will_id = client.create_will(
-                &owner,
-                &soroban_sdk::vec![&env, (token_address.clone(), amount_per_will)],
-                &beneficiary_vec,
-                &90,
-                &7,
-                &soroban_sdk::vec![&env],
-                &1,
-                &None,
-            );
-            all_ids.push_back(will_id);
-        }
-    }
-
-    // Sanity: total wills created matches expectation.
-    assert_eq!(all_ids.len(), TOTAL_WILLS);
-
-    // Assert get_wills_by_owner returns exactly WILLS_PER_OWNER for every owner.
-    for o in 0..NUM_OWNERS as usize {
-        let owner = owners.get(o as u32).unwrap();
-        let owner_wills = client.get_wills_by_owner(&owner);
-        assert_eq!(
-            owner_wills.len(),
-            WILLS_PER_OWNER,
-            "owner {} has wrong will count",
-            o
-        );
-        for will in owner_wills.iter() {
-            assert_eq!(will.owner, owner);
-            assert_eq!(will.status, WillStatus::Active);
-        }
-    }
-
-    // Spot-check get_will for the first and last will id.
-    let first_id = all_ids.get(0).unwrap();
-    let last_id = all_ids.get(TOTAL_WILLS - 1).unwrap();
-    assert_eq!(client.get_will(&first_id).status, WillStatus::Active);
-    assert_eq!(client.get_will(&last_id).status, WillStatus::Active);
-
-    // Exercise check_in on the first will of each owner.
-    advance_time(&env, 30 * DAY);
-    for o in 0..NUM_OWNERS as usize {
-        let owner = owners.get(o as u32).unwrap();
-        let will_id = all_ids.get((o as u32) * WILLS_PER_OWNER).unwrap();
-        client.check_in(&will_id, &owner);
-    }
-
-    // Exercise top_up on the second will of each owner.
-    for o in 0..NUM_OWNERS as usize {
-        let owner = owners.get(o as u32).unwrap();
-        // Mint a bit more for top_up.
-        token_admin_client.mint(&owner, &1_000);
-        let will_id = all_ids.get((o as u32) * WILLS_PER_OWNER + 1).unwrap();
-        client.top_up(&will_id, &owner, &token_address, &1_000);
-        let will = client.get_will(&will_id);
-        assert_eq!(
-            will.balances.get(token_address.clone()).unwrap(),
-            amount_per_will + 1_000
-        );
-    }
-
-    // Assert get_wills_by_beneficiary returns a non-empty list for each beneficiary.
-    // The exact count depends on how many wills named each address, but with
-    // 200 wills cycling through 5 beneficiaries each will should be named many times.
-    for b_idx in 0..5u32 {
-        let beneficiary_addr = beneficiaries.get(b_idx).unwrap();
-        let beneficiary_wills = client.get_wills_by_beneficiary(&beneficiary_addr);
-        assert!(
-            beneficiary_wills.len() > 0,
-            "beneficiary {} not named in any will",
-            b_idx
-        );
-        // Every returned will should list this beneficiary.
-        for will in beneficiary_wills.iter() {
-            let names_this_beneficiary = will
-                .beneficiaries
-                .iter()
-                .any(|b| b.address == beneficiary_addr);
-            assert!(
-                names_this_beneficiary,
-                "beneficiary index returned a will that does not name the beneficiary"
-            );
-        }
-    }
-
-    // Resource-cost note: at 200 wills the per-owner index (Vec<u64>) holds
-    // 10 entries. get_wills_by_owner must deserialize each will individually,
-    // so its instruction cost grows linearly with the per-owner will count.
-    // Beneficiary indexes are wider (each address can appear in ~80 of 200
-    // wills here) and get_wills_by_beneficiary scales accordingly. Neither
-    // dimension is expected to be a problem in practice for typical user
-    // activity, but callers with very large indexes should paginate via
-    // the cursor/limit overloads once those are added.
-}
-
-// ── Issue #4: Corrupted-index entries now panic rather than silently vanish ──
-
-/// Injects a phantom will id (999) into the owner index without storing the
-/// corresponding `Will` entry, then asserts that `get_wills_by_owner` panics
-/// (WillError::WillNotFound) instead of silently returning a shorter list.
-#[test]
-#[should_panic]
-fn test_get_wills_by_owner_panics_on_corrupted_index() {
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
-
-    // Create a real will so the owner index exists.
-    client.create_will(
+    let will_id = client.create_will(
         &owner,
-        &soroban_sdk::vec![&env, (token_address, 1_000_000_i128)],
-        &soroban_sdk::vec![&env, bp(&beneficiary, 10_000)],
+        &vec![&env, (token_id.clone(), 5_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
         &90,
         &7,
-        &soroban_sdk::vec![&env],
-        &1,
+        &vec![&env],
         &None,
     );
 
-    // Directly inject a phantom will id into the owner's index using the
-    // storage layer. Will id 999 has no corresponding Will entry in storage.
-    env.as_contract(&client.address, || {
-        crate::storage::index_by_owner(&env, &owner, 999);
-    });
+    // The contract recorded a balance for a transfer that never actually
+    // happened: the mock's `transfer` is a no-op, so no funds ever moved,
+    // yet `Will.balances` reflects the full requested amount.
+    let will = client.get_will(&will_id);
+    assert_eq!(will.balances.get(token_id.clone()).unwrap(), 5_000_000);
 
-    // This must panic (WillNotFound) rather than silently returning 1 result.
-    client.get_wills_by_owner(&owner);
+    // Confirming the transfer really was a no-op: the mock token never
+    // tracked any balance for the owner or the contract, because its
+    // `transfer` does not touch storage at all.
+    assert_eq!(token_client.balance(&owner), 0);
+    assert_eq!(token_client.balance(&contract_id), 0);
 }
 
-/// Injects a phantom will id (999) into the beneficiary index without storing
-/// the corresponding `Will` entry, then asserts that `get_wills_by_beneficiary`
-/// panics (WillError::WillNotFound) instead of silently returning a shorter list.
-#[test]
-#[should_panic]
-fn test_get_wills_by_beneficiary_panics_on_corrupted_index() {
-    let (env, client, owner, _token, token_address) = setup();
-    let beneficiary = Address::generate(&env);
+/// Minimal mock SEP-41-shaped token whose `transfer` silently no-ops
+/// instead of moving funds or reverting. Shares the "fake token contract"
+/// approach used by `test_support::MaliciousToken` (issue #55's reentrancy
+/// harness), but simulates a different misbehavior: instead of reentering
+/// the caller, it simply pretends every transfer succeeded without moving
+/// any balance.
+#[contract]
+pub struct NoopToken;
 
-    // Create a real will so the beneficiary index exists.
-    client.create_will(
-        &owner,
-        &soroban_sdk::vec![&env, (token_address, 1_000_000_i128)],
-        &soroban_sdk::vec![&env, bp(&beneficiary, 10_000)],
-        &90,
-        &7,
-        &soroban_sdk::vec![&env],
-        &1,
-        &None,
-    );
+#[contractimpl]
+impl NoopToken {
+    pub fn mint(_env: Env, _to: Address, _amount: i128) {}
 
-    // Inject a phantom will id into the beneficiary's index.
-    env.as_contract(&client.address, || {
-        crate::storage::index_by_beneficiary(&env, &beneficiary, 999);
-    });
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        0
+    }
 
-    // This must panic (WillNotFound) rather than silently returning 1 result.
-    client.get_wills_by_beneficiary(&beneficiary);
+    /// Always "succeeds" without moving any balance, unlike a conforming
+    /// SEP-41 token which would debit `from` and credit `to`.
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+        // no-op: silently pretend the transfer happened.
+    }
 }

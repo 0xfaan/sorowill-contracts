@@ -6,17 +6,33 @@
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
-use crate::types::GuardianVoteReason;
+use crate::types::{Beneficiary, GuardianVoteReason};
 
 /// Published when a new will is created.
 ///
 /// `token_count` is the number of distinct tokens locked at creation time.
+///
+/// `beneficiaries` is the *full* beneficiary list (address + allocation
+/// pairs), not just a count, so an off-chain indexer can reconstruct who a
+/// will's beneficiaries are directly from this event, without a follow-up
+/// `get_will` call.
+///
+/// # Payload size tradeoff
+///
+/// A will is capped at `MAX_BENEFICIARIES` (10) entries by contract
+/// validation before this event is ever published, so the list here is
+/// always bounded to at most 10 `(Address, Allocation)` pairs — comfortably
+/// inside Soroban's per-event payload limit. If `MAX_BENEFICIARIES` is ever
+/// raised substantially, this event would need to either truncate the list
+/// (documenting that indexers must fall back to `get_will` for the
+/// remainder) or split into multiple events; at the current cap, full
+/// fidelity is cheap enough that neither is necessary.
 pub fn will_created(
     env: &Env,
     will_id: u64,
     owner: &Address,
     token_count: u32,
-    beneficiaries_count: u32,
+    beneficiaries: &Vec<Beneficiary>,
     checkin_deadline: u64,
 ) {
     env.events().publish(
@@ -24,7 +40,7 @@ pub fn will_created(
         (
             owner.clone(),
             token_count,
-            beneficiaries_count,
+            beneficiaries.clone(),
             checkin_deadline,
         ),
     );
@@ -116,6 +132,34 @@ pub fn guardian_voted(env: &Env, will_id: u64, guardian: &Address, weight: u32, 
     env.events().publish(
         (symbol_short!("gvote"), will_id),
         (guardian.clone(), weight, total_weight),
+    );
+}
+
+/// Published each time a guardian votes to cancel a trigger (return to Active).
+pub fn guardian_cancel_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    weight: u32,
+    total_weight: u32,
+) {
+    env.events().publish(
+        (symbol_short!("gcvote"), will_id),
+        (guardian.clone(), weight, total_weight),
+    );
+}
+
+/// Published when guardian cancel-trigger votes reach quorum and the will is
+/// returned to `Active` status with a fresh check-in deadline.
+pub fn guardian_cancelled_trigger(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    next_deadline: u64,
+) {
+    env.events().publish(
+        (symbol_short!("gcancel"), will_id),
+        (guardian.clone(), next_deadline),
     );
 }
 
