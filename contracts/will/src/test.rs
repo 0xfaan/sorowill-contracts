@@ -5492,3 +5492,164 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── Issue #165: extend_ttl must be called after every storage write ───────────
+
+/// After `create_will`, the will's own storage entry must have its TTL bumped
+/// to `BUMP_AMOUNT` (60 days × 17,280 ledgers/day = 1,036,800 ledgers).
+/// This test reads the stored TTL directly via the persistent-storage testutils
+/// to confirm that `save_will` calls `extend_ttl` as required.
+#[test]
+fn test_create_will_extends_will_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    // BUMP_AMOUNT = 60 days * 17_280 ledgers/day = 1_036_800 ledgers.
+    // The TTL on the Will entry must be at least that value immediately after
+    // create_will, proving extend_ttl was called.
+    const DAY_IN_LEDGERS: u32 = 17_280;
+    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+
+    let actual_ttl = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::storage::DataKey::Will(will_id))
+    });
+
+    assert!(
+        actual_ttl >= BUMP_AMOUNT,
+        "expected Will({will_id}) TTL >= {BUMP_AMOUNT} ledgers after create_will, got {actual_ttl}"
+    );
+}
+
+/// After `create_will`, the owner-index entry (`OwnerWills`) must also have
+/// its TTL bumped to `BUMP_AMOUNT`, confirming that `index_by_owner` calls
+/// `extend_ttl` after the `set`.
+#[test]
+fn test_create_will_extends_owner_index_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    const DAY_IN_LEDGERS: u32 = 17_280;
+    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+
+    let actual_ttl = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::storage::DataKey::OwnerWills(owner.clone()))
+    });
+
+    assert!(
+        actual_ttl >= BUMP_AMOUNT,
+        "expected OwnerWills TTL >= {BUMP_AMOUNT} ledgers after create_will, got {actual_ttl}"
+    );
+}
+
+/// After `create_will`, the beneficiary-index entry (`BeneficiaryWills`) must
+/// also have its TTL bumped, confirming that `index_by_beneficiary` calls
+/// `extend_ttl` after the `set`.
+#[test]
+fn test_create_will_extends_beneficiary_index_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    const DAY_IN_LEDGERS: u32 = 17_280;
+    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+
+    let actual_ttl = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::storage::DataKey::BeneficiaryWills(beneficiary.clone()))
+    });
+
+    assert!(
+        actual_ttl >= BUMP_AMOUNT,
+        "expected BeneficiaryWills TTL >= {BUMP_AMOUNT} ledgers after create_will, got {actual_ttl}"
+    );
+}
+
+/// `check_in` writes an updated `Will` back via `save_will`, which must call
+/// `extend_ttl`. This test advances the ledger sequence past LIFETIME_THRESHOLD
+/// (30 days × 17,280) then checks in and confirms the TTL was refreshed out to
+/// BUMP_AMOUNT, proving that a future refactor cannot drop the `extend_ttl`
+/// call from `save_will` without this test catching it.
+#[test]
+fn test_check_in_refreshes_will_ttl() {
+    use soroban_sdk::testutils::storage::Persistent as _;
+
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    const DAY_IN_LEDGERS: u32 = 17_280;
+    const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
+
+    // Age the ledger sequence past LIFETIME_THRESHOLD (30 days) without
+    // advancing the timestamp past the check-in deadline (90 days).
+    env.ledger().with_mut(|l| {
+        l.sequence_number += DAY_IN_LEDGERS * 31;
+    });
+    advance_time(&env, 10 * DAY); // 10 days in timestamp — within the 90-day window
+
+    client.check_in(&will_id, &owner);
+
+    let actual_ttl = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&crate::storage::DataKey::Will(will_id))
+    });
+
+    assert!(
+        actual_ttl >= BUMP_AMOUNT,
+        "expected Will({will_id}) TTL >= {BUMP_AMOUNT} ledgers after check_in, got {actual_ttl}"
+    );
+}
