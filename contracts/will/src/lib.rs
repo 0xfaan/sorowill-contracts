@@ -1320,6 +1320,8 @@ impl WillContract {
 
         events::batch_created(&env, &owner, &ids);
         ids
+    }
+
     /// Migrates a will to the latest schema version. The owner must authorize
     /// this call. This is an owner-initiated per-will migration that allows
     /// users to opt-in to new contract versions without being forced to do so.
