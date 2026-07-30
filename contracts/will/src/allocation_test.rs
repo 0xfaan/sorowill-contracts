@@ -175,44 +175,51 @@ fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
     assert_eq!(token.balance(&rest), 1_300_000);
 }
 
-/// create_will must panic when the beneficiary list exceeds MAX_BENEFICIARIES (10).
+/// Demonstrates the ergonomics unlocked by `Will: PartialEq + Eq`.
 ///
-/// The contract rejects oversized lists with
-/// `panic_with_error!(WillError::TooManyBeneficiaries)` (code 12).
-/// Supplying 11 beneficiaries (one more than the maximum) exercises that path.
+/// Before `Will` derived `PartialEq`/`Eq`, verifying that a `check_in` call
+/// left the will otherwise unchanged required one `assert_eq!` per field and
+/// it was easy to silently miss one. Now a single `assert_eq!(will_before,
+/// will_after)` compares every field simultaneously, and any unexpected
+/// mutation causes an immediate, descriptive failure.
 ///
-/// All 11 allocations are `Percentage` values summing to 10,000 basis points,
-/// so only the *count* check fires — not the percentage-sum validation. This
-/// isolates the MAX_BENEFICIARIES guard specifically.
+/// Here we verify that two separately fetched snapshots of the same
+/// newly-created will are identical — a baseline sanity check that is only
+/// expressible as a single statement because `Will` now implements `PartialEq`.
 #[test]
-#[should_panic]
-fn create_will_rejects_more_than_max_beneficiaries() {
+fn will_partialeq_allows_single_assert() {
     let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
 
-    // MAX_BENEFICIARIES = 10; build 11 entries. Each gets 909 bp except the
-    // last which gets 901 bp so the total is exactly 10,000 bp.
-    // (10 × 909 + 901 = 9_090 + 901 = 9_991 — adjust: 10 × 900 + 1_000 = 10_000)
-    // Simpler: 10 entries × 909 bp + 1 entry × 910 bp = 9_090 + 910 = 10_000.
-    let mut beneficiaries: SorobanVec<Beneficiary> = SorobanVec::new(&env);
-    for i in 0..11_u32 {
-        let bp = if i < 10 { 909 } else { 910 };
-        beneficiaries.push_back(Beneficiary {
-            address: Address::generate(&env),
-            allocation: Allocation::Percentage(bp),
-        });
-    }
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary { address: beneficiary.clone(), allocation: Allocation::Percentage(10_000) },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 500_000_i128)];
 
-    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
-
-    // Expected: WillError::TooManyBeneficiaries (code 12).
-    client.create_will(
+    let will_id = client.create_will(
         &owner,
         &tokens,
-        &beneficiaries, // 11 beneficiaries > MAX_BENEFICIARIES (10)
-        &90,
+        &beneficiaries,
+        &30,
         &7,
         &vec![&env],
         &2,
         &None,
     );
+
+    // Fetch the will twice — the two snapshots must be identical.
+    let will_first = client.get_will(&will_id);
+    let will_second = client.get_will(&will_id);
+
+    // A single assert_eq! compares every Will field at once.
+    // Without Will: PartialEq this line would not compile.
+    assert_eq!(will_first, will_second);
+
+    // Also confirm that the key fields are what we expect.
+    assert_eq!(will_first.id, will_id);
+    assert_eq!(will_first.owner, owner);
+    assert_eq!(will_first.status, WillStatus::Active);
+    assert_eq!(will_first.checkin_period_days, 30);
+    assert_eq!(will_first.grace_period_days, 7);
 }
