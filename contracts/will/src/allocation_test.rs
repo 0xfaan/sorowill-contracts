@@ -174,3 +174,52 @@ fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
     assert_eq!(token.balance(&sister), 200_000);
     assert_eq!(token.balance(&rest), 1_300_000);
 }
+
+/// Demonstrates the ergonomics unlocked by `Will: PartialEq + Eq`.
+///
+/// Before `Will` derived `PartialEq`/`Eq`, verifying that a `check_in` call
+/// left the will otherwise unchanged required one `assert_eq!` per field and
+/// it was easy to silently miss one. Now a single `assert_eq!(will_before,
+/// will_after)` compares every field simultaneously, and any unexpected
+/// mutation causes an immediate, descriptive failure.
+///
+/// Here we verify that two separately fetched snapshots of the same
+/// newly-created will are identical — a baseline sanity check that is only
+/// expressible as a single statement because `Will` now implements `PartialEq`.
+#[test]
+fn will_partialeq_allows_single_assert() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary { address: beneficiary.clone(), allocation: Allocation::Percentage(10_000) },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 500_000_i128)];
+
+    let will_id = client.create_will(
+        &owner,
+        &tokens,
+        &beneficiaries,
+        &30,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    // Fetch the will twice — the two snapshots must be identical.
+    let will_first = client.get_will(&will_id);
+    let will_second = client.get_will(&will_id);
+
+    // A single assert_eq! compares every Will field at once.
+    // Without Will: PartialEq this line would not compile.
+    assert_eq!(will_first, will_second);
+
+    // Also confirm that the key fields are what we expect.
+    assert_eq!(will_first.id, will_id);
+    assert_eq!(will_first.owner, owner);
+    assert_eq!(will_first.status, WillStatus::Active);
+    assert_eq!(will_first.checkin_period_days, 30);
+    assert_eq!(will_first.grace_period_days, 7);
+}
