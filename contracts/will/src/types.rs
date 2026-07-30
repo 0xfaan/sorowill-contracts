@@ -151,7 +151,7 @@ pub struct ClaimableShare {
 
 /// The full on-chain state of a single will.
 #[contracttype]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Will {
     /// Unique, monotonically increasing identifier for this will.
     pub id: u64,
