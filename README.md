@@ -49,8 +49,23 @@ cargo install --locked stellar-cli --features opt
 git clone https://github.com/SoroWill/sorowill-contracts.git
 cd sorowill-contracts
 cargo test
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
+
+### Task runner (recommended)
+
+This repo ships a [`justfile`](./justfile) with the exact commands CI runs, so you don't have to remember or copy them from this README. Install [`just`](https://github.com/casey/just#installation), then:
+
+```bash
+just --list    # see every available recipe
+just test      # cargo test --workspace
+just lint      # cargo clippy --all-targets -- -D warnings (CI's exact flags)
+just build     # cargo build --workspace --release --target wasm32v1-none
+just fmt       # cargo fmt --all
+just ci        # run everything CI runs, in order
+```
+
+If you don't have `just` installed, the raw `cargo` commands above work identically.
 
 ## Resource costs
 
@@ -177,7 +192,7 @@ for the full update process.
 
 ## Testnet Deployment
 
-The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json), updated manually whenever a new version is deployed:
+The deployed contract ID for Stellar Testnet is recorded in [`deployments/testnet.json`](./deployments/testnet.json):
 
 ```json
 {
@@ -186,6 +201,20 @@ The deployed contract ID for Stellar Testnet is recorded in [`deployments/testne
   "deployedAt": "<ISO-8601 timestamp>"
 }
 ```
+
+Redeploying is automated via [`scripts/deploy-testnet.sh`](./scripts/deploy-testnet.sh), which builds the release wasm, deploys it with `stellar contract deploy`, and rewrites this file with the new contract id and timestamp:
+
+```bash
+# One-time: create and fund a testnet identity
+stellar keys generate deployer --network testnet --fund
+
+# Build, deploy, and record the result in deployments/testnet.json
+DEPLOY_IDENTITY=deployer ./scripts/deploy-testnet.sh
+```
+
+Requires `stellar-cli` (same version as [Local Setup](#local-setup)) and a funded testnet identity passed via `DEPLOY_IDENTITY`. `NETWORK` and `RPC_URL` are optional overrides — see the script header for details.
+
+After running it, review and commit the updated `deployments/testnet.json` on its own — see [CONTRIBUTING.md](./CONTRIBUTING.md#updating-deploymentstestnetjson-after-a-redeploy) for the full checklist. A scheduled CI job also checks daily that this file's contract id still matches the on-chain wasm, so a forgotten update won't drift silently — see [Testnet Deployment Drift Check](.github/workflows/testnet-drift-check.yml).
 
 ## Security Policy
 
