@@ -5492,3 +5492,180 @@ fn test_create_will_zero_grace_period_rejected() {
         &None,
     );
 }
+
+// ── Issue #163: check_in / top_up / update_beneficiaries rejected on non-Active wills ──
+
+/// A will in `Triggered` status must reject `check_in` with `WillNotActive`.
+///
+/// This is a regression test: `check_in` calls `assert_status(...,
+/// WillStatus::Active, WillError::WillNotActive)` but that branch was never
+/// exercised by the existing test suite against a `Triggered` will.
+#[test]
+fn test_check_in_rejected_on_triggered_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    // Advance past the check-in deadline and trigger the will.
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+
+    // check_in must be rejected on a Triggered will.
+    let result = client.try_check_in(&will_id, &owner);
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
+
+/// A will in `Cancelled` status must reject `check_in` with `WillNotActive`.
+#[test]
+fn test_check_in_rejected_on_cancelled_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
+
+    // check_in must be rejected on a Cancelled will.
+    let result = client.try_check_in(&will_id, &owner);
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
+
+/// A will in `Triggered` status must reject `top_up` with `WillNotActive`.
+///
+/// `top_up` calls `assert_status(..., WillStatus::Active, WillError::WillNotActive)`
+/// but there was no test exercising that guard against a `Triggered` will.
+#[test]
+fn test_top_up_rejected_on_triggered_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+
+    // top_up must be rejected on a Triggered will.
+    let result = client.try_top_up(&will_id, &owner, &token_address, &100_000);
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
+
+/// A will in `Cancelled` status must reject `top_up` with `WillNotActive`.
+#[test]
+fn test_top_up_rejected_on_cancelled_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
+
+    // top_up must be rejected on a Cancelled will.
+    let result = client.try_top_up(&will_id, &owner, &token_address, &100_000);
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
+
+/// A will in `Triggered` status must reject `update_beneficiaries` with `WillNotActive`.
+///
+/// `update_beneficiaries` calls `assert_status` but the guard was untested
+/// against a non-Active will despite being the entry point most likely to
+/// change in a future refactor.
+#[test]
+fn test_update_beneficiaries_rejected_on_triggered_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+
+    // update_beneficiaries must be rejected on a Triggered will.
+    let result = client.try_update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![&env, Beneficiary { address: new_beneficiary.clone(), basis_points: 10_000 }],
+    );
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
+
+/// A will in `Cancelled` status must reject `update_beneficiaries` with `WillNotActive`.
+#[test]
+fn test_update_beneficiaries_rejected_on_cancelled_will() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Cancelled);
+
+    // update_beneficiaries must be rejected on a Cancelled will.
+    let result = client.try_update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![&env, Beneficiary { address: new_beneficiary.clone(), basis_points: 10_000 }],
+    );
+    assert_eq!(result, Err(Ok(WillError::WillNotActive.into())));
+}
