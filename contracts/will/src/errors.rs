@@ -62,4 +62,8 @@ pub enum WillError {
     KeeperBountyExceedsMax = 19,
     /// Guardian threshold is out of range (must be 1..=guardians.len()).
     InvalidGuardianThreshold = 20,
+    /// The sum of every `Allocation::FixedAmount` beneficiary on a will
+    /// exceeds the will's balance, or (for a will with no percentage-based
+    /// beneficiaries at all) does not exactly account for the whole balance.
+    FixedAmountExceedsBalance = 21,
 }

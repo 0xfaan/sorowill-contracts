@@ -20,8 +20,8 @@ use soroban_sdk::{
 };
 
 use crate::fuzz_harness::{
-    run_create_will, run_update_beneficiaries, BeneficiarySpec, CreateWillInput, Outcome,
-    UpdateBeneficiariesInput,
+    run_create_will, run_update_beneficiaries, sanitize_specs, BeneficiarySpec, CreateWillInput,
+    Outcome, UpdateBeneficiariesInput,
 };
 use crate::{Beneficiary, WillContract, WillContractClient, WillError};
 
@@ -231,6 +231,47 @@ proptest! {
         // One outcome per replacement list actually applied.
         prop_assert!(outcomes.len() <= input.updates.len());
     }
+
+    /// Issue #27-style invariant test: `assert_valid_percentages` is called
+    /// from both `create_will` and `update_beneficiaries`, but nothing
+    /// previously proved that, across an arbitrary *sequence* of operations,
+    /// a will's beneficiary percentages can never drift away from summing to
+    /// exactly 100% (10,000 basis points).
+    ///
+    /// Every replacement list here is built with `sanitize_specs`, the same
+    /// helper `sanitize_create` uses, so every `update_beneficiaries` call in
+    /// the sequence is valid-by-construction and therefore guaranteed to be
+    /// `Accepted`. `run_update_beneficiaries` reloads the will with `get_will`
+    /// after every accepted call and checks the stored basis points sum to
+    /// 10,000 (see `assert_updated_beneficiaries` in `fuzz_harness`) — so
+    /// asserting every outcome is `Accepted` here proves that check actually
+    /// ran after each and every operation in the sequence, not just the last.
+    #[test]
+    fn percentages_never_drift_across_valid_operation_sequences(
+        create in create_will_input_strategy(),
+        raw_updates in prop::collection::vec(beneficiaries_strategy(), 1..6),
+        probe_non_owner in any::<bool>(),
+    ) {
+        let updates: Vec<Vec<BeneficiarySpec>> = raw_updates
+            .iter()
+            .map(|specs| sanitize_specs(specs))
+            .collect();
+        let input = UpdateBeneficiariesInput {
+            create,
+            updates,
+            probe_non_owner,
+        };
+
+        let outcomes = run_update_beneficiaries(&input);
+        prop_assert_eq!(outcomes.len(), input.updates.len());
+        for outcome in outcomes.iter() {
+            prop_assert!(
+                matches!(outcome, Outcome::Accepted(_)),
+                "a valid-by-construction update was rejected: {:?}",
+                outcome,
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,13 +301,13 @@ fn single_beneficiary(env: &Env, basis_points: u32) -> SorobanVec<Beneficiary> {
         env,
         Beneficiary {
             address: Address::generate(env),
-            basis_points,
+            allocation: crate::Allocation::Percentage(basis_points),
         },
     ]
 }
 
 /// Two huge basis-point values used to overflow the running total in
-/// `assert_valid_percentages`, aborting the contract instead of returning
+/// `assert_valid_allocations`, aborting the contract instead of returning
 /// `InvalidPercentages`.
 #[test]
 fn create_will_rejects_overflowing_basis_points() {
@@ -275,11 +316,11 @@ fn create_will_rejects_overflowing_basis_points() {
         &env,
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: u32::MAX,
+            allocation: crate::Allocation::Percentage(u32::MAX),
         },
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: u32::MAX,
+            allocation: crate::Allocation::Percentage(u32::MAX),
         },
     ];
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
@@ -455,11 +496,11 @@ fn update_beneficiaries_rejects_overflowing_basis_points() {
         &env,
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: u32::MAX,
+            allocation: crate::Allocation::Percentage(u32::MAX),
         },
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: 1,
+            allocation: crate::Allocation::Percentage(1),
         },
     ];
 
