@@ -1,0 +1,13 @@
+# Configuration for `cargo audit` (see .github/workflows/audit.yml).
+#
+# Advisories that have been triaged and judged not to apply to this crate's
+# usage can be allow-listed here. Every entry MUST carry a comment explaining
+# why it's safe to ignore and, ideally, a link to the tracking issue for the
+# real fix. Never add an entry without justification — see
+# CONTRIBUTING.md#handling-a-flagged-security-advisory for the full process.
+
+[advisories]
+ignore = [
+    # Example (do not uncomment without a real justification):
+    # "RUSTSEC-0000-0000", # unreachable from no_std wasm build; tracked in #123
+]
