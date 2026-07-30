@@ -1,6 +1,7 @@
                                                                                                                                                                                                                                                                                                                                          #![cfg(test)]
 
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, Vec as SorobanVec,
@@ -5574,4 +5575,166 @@ fn test_create_will_zero_grace_period_rejected() {
         &vec![&env],
         &None,
     );
+}
+
+// ── Atomicity of create_will when the token transfer fails ───────────────
+//
+// Soroban transactions are atomic: if any host call inside a contract
+// invocation fails (traps), every storage write performed earlier in that
+// same invocation is rolled back as if it never happened. `create_will`
+// relies on this: it writes the `Will` record, the `NextWillId` counter, and
+// the owner/beneficiary index entries only after the loop that performs the
+// token transfer for every entry. If `token::Client::transfer` panics (e.g.
+// the owner has insufficient balance or never approved a large enough
+// allowance for the contract to pull from), the whole invocation must
+// revert with no partial state left behind. This was previously an
+// assumption baked into the atomicity of the host — never directly
+// exercised by a test.
+#[test]
+fn test_create_will_reverts_atomically_on_insufficient_balance() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // owner was minted 1_000_000_000 in `setup`; ask for far more than that
+    // so the underlying SAC `transfer` call traps.
+    let excessive_amount = 10_000_000_000_i128;
+
+    let result = client.try_create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), excessive_amount)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert!(result.is_err(), "create_will should fail when the transfer cannot be completed");
+
+    // No Will record and no index entries should have been left behind by
+    // the failed attempt.
+    assert!(client.get_wills_by_owner(&owner).is_empty());
+    assert!(client.get_wills_by_beneficiary(&beneficiary).is_empty());
+
+    // The owner's balance must be untouched — the failed transfer must not
+    // have moved any funds either.
+    assert_eq!(token.balance(&owner), 1_000_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+
+    // `NextWillId` must not have been incremented by the failed attempt: the
+    // next *successful* call should still allocate id 1, not 2.
+    let good_will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, 1_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary.clone(),
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+    assert_eq!(
+        good_will_id, 1,
+        "a failed create_will must not have consumed a will id"
+    );
+}
+
+// ── Behavior against a non-conforming ("misbehaving") token ───────────────
+//
+// Every other test in this file uses the real Stellar Asset Contract, which
+// faithfully implements SEP-41's `transfer`. `create_will`'s `tokens`
+// parameter accepts *any* `Address`, with no interface or behavior
+// validation (see issue #74) — nothing stops an owner from locking a will
+// against a token contract that doesn't actually move funds. This test uses
+// the `NoopToken` mock defined below, whose `transfer` silently returns
+// without adjusting any balance, to document the contract's current
+// behavior in that situation: it happily records a `Will` with a balance
+// that was never actually backed by a real transfer.
+//
+// This is a documented gap, not a fix. Whether `create_will` should
+// additionally verify the token's balance moved (e.g. by reading balances
+// before/after the transfer call) is left as a follow-up beyond this test —
+// see issue #74 for the broader token-validation discussion. Right now the
+// contract trusts `token::Client::transfer` unconditionally, exactly as it
+// would for a real SAC.
+#[test]
+fn test_create_will_with_noop_token_records_unbacked_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+
+    let token_id = env.register(NoopToken, ());
+    let token_client = NoopTokenClient::new(&env, &token_id);
+    // Deliberately do NOT mint anything to `owner` — a conforming token
+    // would reject the transfer below for insufficient balance. This mock
+    // never checks balances at all, which is exactly the misbehavior being
+    // demonstrated.
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_id.clone(), 5_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &None,
+    );
+
+    // The contract recorded a balance for a transfer that never actually
+    // happened: the mock's `transfer` is a no-op, so no funds ever moved,
+    // yet `Will.balances` reflects the full requested amount.
+    let will = client.get_will(&will_id);
+    assert_eq!(will.balances.get(token_id.clone()).unwrap(), 5_000_000);
+
+    // Confirming the transfer really was a no-op: the mock token never
+    // tracked any balance for the owner or the contract, because its
+    // `transfer` does not touch storage at all.
+    assert_eq!(token_client.balance(&owner), 0);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+/// Minimal mock SEP-41-shaped token whose `transfer` silently no-ops
+/// instead of moving funds or reverting. Shares the "fake token contract"
+/// approach used by `test_support::MaliciousToken` (issue #55's reentrancy
+/// harness), but simulates a different misbehavior: instead of reentering
+/// the caller, it simply pretends every transfer succeeded without moving
+/// any balance.
+#[contract]
+pub struct NoopToken;
+
+#[contractimpl]
+impl NoopToken {
+    pub fn mint(_env: Env, _to: Address, _amount: i128) {}
+
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        0
+    }
+
+    /// Always "succeeds" without moving any balance, unlike a conforming
+    /// SEP-41 token which would debit `from` and credit `to`.
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+        // no-op: silently pretend the transfer happened.
+    }
 }
