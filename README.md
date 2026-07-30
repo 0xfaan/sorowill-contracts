@@ -63,7 +63,9 @@ cargo test -p will --lib profile -- --nocapture
 
 See [docs/RESOURCE_COSTS.md](./docs/RESOURCE_COSTS.md) for the current numbers,
 what drives each entry point's cost, and the storage layout trade-offs behind
-them.
+them. The release build profile is separately tuned for `.wasm` binary size
+(deploy cost) — see [docs/WASM_SIZE.md](./docs/WASM_SIZE.md).
+
 ## Testing and fuzzing
 
 `cargo test` runs the hand-written suite in `contracts/will/src/test.rs`
@@ -82,6 +84,20 @@ cd fuzz && cargo +nightly fuzz run create_will
 
 See [docs/FUZZING.md](./docs/FUZZING.md) for the invariants that are checked,
 how to reproduce and minimise a crash, and how to add a target.
+
+## Contract Constants
+
+The following limits are defined as `pub const` in `lib.rs` and re-exported from the crate root. They are the canonical source of truth — off-chain tooling, test harnesses, and SDK integrations should import them directly rather than hardcoding duplicates that can silently drift out of sync.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MAX_BENEFICIARIES` | `10` | Maximum number of beneficiaries per will |
+| `MAX_GUARDIANS` | `3` | Maximum number of guardians per will |
+| `GUARDIAN_THRESHOLD` | `2` | Default number of guardian votes required to force an early release |
+
+```rust
+use will::{MAX_BENEFICIARIES, MAX_GUARDIANS, GUARDIAN_THRESHOLD};
+```
 
 ## Contract Functions
 
@@ -103,6 +119,61 @@ how to reproduce and minimise a crash, and how to add a target.
 | `guardian_trigger` | Casts a guardian vote; 2 of 3 forces an early release | `will_id`, `guardian` | — |
 
 `checkin_period_days` and `grace_period_days` passed to `create_will` must each be at least `1` day (and at most `MAX_PERIOD_DAYS`); a value of `0` panics with `WillError::InvalidPeriod`.
+
+## Error codes
+
+Every failure mode is a `#[contracterror]` variant of `WillError`
+(defined in [`contracts/will/src/errors.rs`](./contracts/will/src/errors.rs)),
+surfaced to callers as a stable numeric code so SDK and app consumers can
+match on the code without parsing panic messages. Note that a few codes are
+intentionally shared by more than one variant below — check the error's
+context (which entry point raised it, and the will's current state) to
+disambiguate.
+
+| Code | Variant | Meaning |
+|---|---|---|
+| 1 | `WillNotFound` | No will exists for the given identifier. |
+| 2 | `NotOwner` | The caller is not the owner of the will. |
+| 3 | `WillNotActive` | The requested action requires the will to be `Active`. |
+| 4 | `WillNotTriggered` | The requested action requires the will to be `Triggered`. |
+| 5 | `GracePeriodNotExpired` | `release_inheritance` was called before the grace period elapsed. |
+| 6 | `GracePeriodExpired` | `emergency_checkin` was called after the grace period already elapsed. |
+| 7 | `InvalidPercentages` | Beneficiary percentages did not sum to exactly 10,000 basis points. |
+| 8 | `AlreadyVoted` | The guardian has already voted to trigger this will. |
+| 9 | `NotGuardian` | The caller is not a designated guardian of this will. |
+| 10 | `CheckinNotDue` | `trigger_will` was called before the check-in deadline passed. |
+| 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
+| 12 | `TooManyBeneficiaries` | Too many beneficiaries (or guardians) were supplied. |
+| 13 | `WillNotSettled` / `WillNotReleased` / `NotSameOwner` / `InvalidPeriod` | Requires `Released`/`Cancelled` status, or requires `Released` status, or both wills in a merge must share an owner, or a check-in/grace period was zero (or too large to represent) — see calling context. |
+| 14 | `WillNotBothActive` / `DuplicateGuardian` | Both wills in a merge must be `Active`, or the same address appeared more than once in a guardian list. |
+| 15 | `SameWillId` / `GuardianCooldownActive` | The same will id was supplied for both sides of a merge, or the guardian-list cooldown hasn't elapsed yet. |
+| 16 | `MergeWouldExceedLimits` | Merging would exceed the maximum beneficiaries or guardians. |
+| 17 | `OwnerCannotBeGuardian` | The owner cannot designate themselves as a guardian of their own will. |
+| 18 | `BeneficiaryNotFound` | A beneficiary is not found in the will's beneficiary list. |
+| 19 | `KeeperBountyExceedsMax` | Keeper bounty basis points exceed the maximum allowed (100 bps / 1%). |
+| 20 | `InvalidGuardianThreshold` | Guardian threshold is out of range (must be between 1 and `guardians.len()`). |
+
+## Contract spec artifact
+
+A versioned, machine-readable export of the contract's public interface —
+every entry-point signature plus the `Will`, `Beneficiary`, `Guardian`,
+`WillStatus`, and `WillError` types — is committed under
+[`spec/`](./spec) as `will-v<crate-version>.json`. It's how
+[`sorowill-sdk`](https://github.com/SoroWill/sorowill-sdk) detects when its
+TypeScript types and XDR encoders have drifted from the deployed contract.
+
+Regenerate it after any change to a public entry point or shared type:
+
+```bash
+./scripts/export-spec.sh
+```
+
+A new file is committed per crate version rather than overwriting the
+previous one, so SDK maintainers can diff any two versions. The `Spec
+Export` GitHub Actions workflow (`.github/workflows/spec-export.yml`) also
+runs this on pushes to `main` that touch the contract, and attaches the
+resulting JSON to tagged GitHub Releases. See [`spec/README.md`](./spec/README.md)
+for the full update process.
 
 ## Testnet Deployment
 

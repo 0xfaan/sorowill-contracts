@@ -15,13 +15,13 @@
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::StellarAssetClient,
+    token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, Vec as SorobanVec,
 };
 
 use crate::fuzz_harness::{
-    run_create_will, run_update_beneficiaries, BeneficiarySpec, CreateWillInput, Outcome,
-    UpdateBeneficiariesInput,
+    run_create_will, run_update_beneficiaries, sanitize_specs, BeneficiarySpec, CreateWillInput,
+    Outcome, UpdateBeneficiariesInput,
 };
 use crate::{Beneficiary, WillContract, WillContractClient, WillError};
 
@@ -110,6 +110,28 @@ fn create_will_input_strategy() -> impl Strategy<Value = CreateWillInput> {
         )
 }
 
+/// Generates between one and MAX_BENEFICIARIES positive shares whose sum is
+/// exactly 10,000 basis points. Random weights are normalized after reserving
+/// one basis point per beneficiary; truncation dust goes to the last entry.
+fn valid_basis_point_split_strategy() -> impl Strategy<Value = Vec<u32>> {
+    (1usize..=crate::MAX_BENEFICIARIES as usize).prop_flat_map(|count| {
+        prop::collection::vec(1u32..=10_000, count).prop_map(move |weights| {
+            let weight_total: u64 = weights.iter().map(|weight| *weight as u64).sum();
+            let distributable = 10_000u64 - count as u64;
+            let mut allocated = 0u32;
+            let mut shares = Vec::with_capacity(count);
+
+            for weight in weights.iter().take(count - 1) {
+                let share = 1 + (distributable * *weight as u64 / weight_total) as u32;
+                shares.push(share);
+                allocated += share;
+            }
+            shares.push(10_000 - allocated);
+            shares
+        })
+    })
+}
+
 fn update_beneficiaries_input_strategy() -> impl Strategy<Value = UpdateBeneficiariesInput> {
     (
         create_will_input_strategy(),
@@ -145,6 +167,61 @@ proptest! {
         }
     }
 
+    /// Every valid beneficiary split must transfer the complete token balance.
+    /// The public release path exercises `distribute` and its final-recipient
+    /// remainder handling exactly as production does.
+    #[test]
+    fn distribution_conserves_every_valid_balance(
+        basis_points in valid_basis_point_split_strategy(),
+        balance in 1i128..=1_000_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_700_000_000);
+
+        let owner = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(owner.clone());
+        let token_address = sac.address();
+        StellarAssetClient::new(&env, &token_address).mint(&owner, &balance);
+        let token = TokenClient::new(&env, &token_address);
+
+        let contract_id = env.register(WillContract, ());
+        let client = WillContractClient::new(&env, &contract_id);
+        let mut beneficiaries = SorobanVec::new(&env);
+        let mut beneficiary_addresses = Vec::with_capacity(basis_points.len());
+        for share in basis_points {
+            let address = Address::generate(&env);
+            beneficiary_addresses.push(address.clone());
+            beneficiaries.push_back(Beneficiary {
+                address,
+                basis_points: share,
+            });
+        }
+
+        let will_id = client.create_will(
+            &owner,
+            &vec![&env, (token_address, balance)],
+            &beneficiaries,
+            &90,
+            &7,
+            &vec![&env],
+            &2,
+            &None,
+        );
+        env.ledger().set_timestamp(1_700_000_000 + 91 * 86_400);
+        client.trigger_will(&will_id);
+        env.ledger().set_timestamp(1_700_000_000 + 99 * 86_400);
+        client.release_inheritance(&will_id, &None);
+
+        let transferred: i128 = beneficiary_addresses
+            .iter()
+            .map(|address| token.balance(address))
+            .sum();
+        prop_assert_eq!(transferred, balance);
+        prop_assert_eq!(token.balance(&client.address), 0);
+        prop_assert!(client.get_will(&will_id).balances.is_empty());
+    }
+
     /// `update_beneficiaries` must likewise never abort, must leave the will
     /// untouched when it rejects an update, and must keep the beneficiary
     /// reverse index in step with the list it stores.
@@ -153,6 +230,47 @@ proptest! {
         let outcomes = run_update_beneficiaries(&input);
         // One outcome per replacement list actually applied.
         prop_assert!(outcomes.len() <= input.updates.len());
+    }
+
+    /// Issue #27-style invariant test: `assert_valid_percentages` is called
+    /// from both `create_will` and `update_beneficiaries`, but nothing
+    /// previously proved that, across an arbitrary *sequence* of operations,
+    /// a will's beneficiary percentages can never drift away from summing to
+    /// exactly 100% (10,000 basis points).
+    ///
+    /// Every replacement list here is built with `sanitize_specs`, the same
+    /// helper `sanitize_create` uses, so every `update_beneficiaries` call in
+    /// the sequence is valid-by-construction and therefore guaranteed to be
+    /// `Accepted`. `run_update_beneficiaries` reloads the will with `get_will`
+    /// after every accepted call and checks the stored basis points sum to
+    /// 10,000 (see `assert_updated_beneficiaries` in `fuzz_harness`) — so
+    /// asserting every outcome is `Accepted` here proves that check actually
+    /// ran after each and every operation in the sequence, not just the last.
+    #[test]
+    fn percentages_never_drift_across_valid_operation_sequences(
+        create in create_will_input_strategy(),
+        raw_updates in prop::collection::vec(beneficiaries_strategy(), 1..6),
+        probe_non_owner in any::<bool>(),
+    ) {
+        let updates: Vec<Vec<BeneficiarySpec>> = raw_updates
+            .iter()
+            .map(|specs| sanitize_specs(specs))
+            .collect();
+        let input = UpdateBeneficiariesInput {
+            create,
+            updates,
+            probe_non_owner,
+        };
+
+        let outcomes = run_update_beneficiaries(&input);
+        prop_assert_eq!(outcomes.len(), input.updates.len());
+        for outcome in outcomes.iter() {
+            prop_assert!(
+                matches!(outcome, Outcome::Accepted(_)),
+                "a valid-by-construction update was rejected: {:?}",
+                outcome,
+            );
+        }
     }
 }
 
@@ -183,13 +301,13 @@ fn single_beneficiary(env: &Env, basis_points: u32) -> SorobanVec<Beneficiary> {
         env,
         Beneficiary {
             address: Address::generate(env),
-            basis_points,
+            allocation: crate::Allocation::Percentage(basis_points),
         },
     ]
 }
 
 /// Two huge basis-point values used to overflow the running total in
-/// `assert_valid_percentages`, aborting the contract instead of returning
+/// `assert_valid_allocations`, aborting the contract instead of returning
 /// `InvalidPercentages`.
 #[test]
 fn create_will_rejects_overflowing_basis_points() {
@@ -198,11 +316,11 @@ fn create_will_rejects_overflowing_basis_points() {
         &env,
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: u32::MAX,
+            allocation: crate::Allocation::Percentage(u32::MAX),
         },
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: u32::MAX,
+            allocation: crate::Allocation::Percentage(u32::MAX),
         },
     ];
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token.clone(), 1_000_000_i128)];
@@ -378,11 +496,11 @@ fn update_beneficiaries_rejects_overflowing_basis_points() {
         &env,
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: u32::MAX,
+            allocation: crate::Allocation::Percentage(u32::MAX),
         },
         Beneficiary {
             address: Address::generate(&env),
-            basis_points: 1,
+            allocation: crate::Allocation::Percentage(1),
         },
     ];
 
