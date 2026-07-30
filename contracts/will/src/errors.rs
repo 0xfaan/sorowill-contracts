@@ -23,6 +23,8 @@ pub enum WillError {
     GracePeriodExpired = 6,
     /// Beneficiary percentages did not sum to exactly 10,000.
     InvalidPercentages = 7,
+    /// A beneficiary percentage is not in the valid range (1..=100).
+    InvalidPercentage = 22,
     /// The guardian has already voted to trigger this will.
     AlreadyVoted = 8,
     /// The caller is not a designated guardian of this will.
@@ -36,9 +38,9 @@ pub enum WillError {
     /// The requested action requires the will to be `Released` or `Cancelled`.
     WillNotSettled = 13,
     /// The requested action requires the will to be `Released`.
-    WillNotReleased = 13,
+    WillNotReleased = 23,
     /// Cannot merge: both wills must be owned by the same address.
-    NotSameOwner = 13,
+    NotSameOwner = 24,
     /// Cannot merge: one or both wills are not in Active status.
     WillNotBothActive = 14,
     /// Cannot merge: same will id provided for both wills.
@@ -47,13 +49,13 @@ pub enum WillError {
     MergeWouldExceedLimits = 16,
     /// A check-in or grace period was zero, or long enough that the resulting
     /// deadline could not be represented as a ledger timestamp.
-    InvalidPeriod = 13,
+    InvalidPeriod = 25,
     /// The same address was supplied more than once in a guardian list.
-    DuplicateGuardian = 14,
+    DuplicateGuardian = 26,
     /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
     /// blocked until the cooldown period passes after the last guardian-list
     /// change.
-    GuardianCooldownActive = 15,
+    GuardianCooldownActive = 27,
     /// The owner cannot designate themselves as a guardian of their own will.
     OwnerCannotBeGuardian = 17,
     /// A beneficiary is not found in the will's beneficiary list.

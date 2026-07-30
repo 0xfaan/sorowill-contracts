@@ -27,10 +27,7 @@ fn lifecycle_through_real_wasm_artifact() {
         .status()
         .expect("failed to spawn scripts/integration_test.sh");
 
-    assert!(
-        status.success(),
-        "integration_test.sh exited with {status}"
-    );
+    assert!(status.success(), "integration_test.sh exited with {status}");
 }
 
 fn repo_root() -> PathBuf {
