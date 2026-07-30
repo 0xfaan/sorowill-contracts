@@ -1,71 +1,48 @@
 # Changelog
 
-## Unreleased
+All notable changes to the `will` contract are documented in this file.
 
-### Breaking change: mixed percentage / fixed-amount beneficiary allocations
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project uses the `version` field in
+[`contracts/will/Cargo.toml`](./contracts/will/Cargo.toml) as its version
+identifier. Each entry below the "in Cargo.toml (change grew here)" line
+gets its own [contract spec artifact](./spec) once exported.
 
-`Beneficiary.basis_points: u32` has been replaced by
-`Beneficiary.allocation: Allocation`, where:
+## [Unreleased]
 
-```rust
-pub enum Allocation {
-    Percentage(u32),  // basis points (1 bp = 0.01%) of whatever remains
-                       // after every FixedAmount beneficiary is paid
-    FixedAmount(i128), // an exact amount, paid before any percentage split
-}
-```
+## [0.1.0] - Initial shipped behavior
 
-A single will may now mix both kinds — e.g. one beneficiary who receives an
-exact amount (e.g. "my sister gets exactly 5,000 USDC") and the rest who
-split whatever remains by percentage, without anyone needing to recompute
-percentages by hand every time the balance changes via `top_up`.
+Seeded entry summarizing the contract's behavior as of this changelog's
+introduction. See the [README's Contract Functions table](./README.md#contract-functions)
+and [`spec/will-v0.1.0.json`](./spec/will-v0.1.0.json) for the authoritative,
+up-to-date interface.
 
-Validation (`assert_valid_allocations`, formerly `assert_valid_percentages`)
-now additionally requires:
-- the sum of every `FixedAmount` on a will never exceeds the will's balance;
-- all `Percentage` shares still sum to exactly 10,000 basis points (100% of
-  the remainder after fixed amounts);
-- a will made up entirely of `FixedAmount` beneficiaries must account for
-  the whole balance, since no percentage beneficiary is left to absorb a
-  remainder.
+### Added
 
-`distribute()` (full release) and `distribute_tier()` (partial/tiered
-release) now pay fixed-amount beneficiaries first, then split whatever
-remains among percentage-based beneficiaries. Fixed-amount beneficiaries are
-intentionally excluded from tiered partial releases — a fixed promise is
-only meaningful once, at final release, so paying a fraction of it early
-would either shortchange or double-pay them; they are always paid in full at
-final release instead.
+- Core will lifecycle: `create_will`, `check_in`, `trigger_will`,
+  `emergency_checkin`, `release_inheritance`, `cancel_will`, `close_will`.
+- Beneficiary management: `update_beneficiaries`, `renounce_beneficiary`,
+  basis-point-based percentage splits (must sum to 10,000).
+- Guardian override: up to 3 named guardians, weighted quorum voting via
+  `guardian_trigger`, guardian list management via `update_guardians`, and
+  a cooldown period after guardian-list changes before a vote can force a
+  release.
+- Multi-token support: a will can hold balances across multiple SEP-41
+  tokens (or native XLM) simultaneously via `top_up`.
+- Batch and convenience operations: `batch_check_in`, `batch_create_wills`,
+  `clone_will`, `merge_wills`, `set_delegate` (delegated check-in),
+  `migrate_will`, `archive_will`.
+- Query surface: `get_will`, `get_wills_by_owner`,
+  `get_wills_by_owner_and_status`, `get_wills_by_beneficiary`,
+  `get_triggered_wills`, `get_protocol_stats`, `get_will_history`,
+  `get_contract_version`.
+- On-chain audit trail via `WillStatusTransition` records, retrievable
+  through `get_will_history`.
+- `WillError` numeric error codes for every failure mode (see the
+  [README's error code reference](./README.md#error-codes)).
+- Resource-cost profiling suite (`docs/RESOURCE_COSTS.md`) and a
+  coverage-guided + property-based fuzzing suite (`docs/FUZZING.md`)
+  covering `create_will` and `update_beneficiaries`.
 
-**Migration note for existing deployed wills:** this is a storage-breaking
-change. Any `Will` written by a contract version prior to this change has
-beneficiaries stored with a `basis_points` field that no longer exists in
-the `Beneficiary` type. Before upgrading a live deployment:
-
-1. Bump `CURRENT_SCHEMA_VERSION` and treat every will with
-   `schema_version < CURRENT_SCHEMA_VERSION` as needing migration.
-2. Extend `migrate_will` to rewrite each legacy beneficiary entry as
-   `Beneficiary { address, allocation: Allocation::Percentage(basis_points) }`
-   — this is a lossless, purely additive reinterpretation, since every
-   pre-existing will was pure-percentage.
-3. Until a will is migrated, reject `update_beneficiaries` /
-   `update_will_settings` calls that would write a mixed or fixed-amount
-   list against it, to avoid a partially-migrated will with an ambiguous
-   on-chain shape.
-
-New error: `WillError::FixedAmountExceedsBalance` (21).
-
-### Event schema change: `will_created` publishes the full beneficiary list
-
-`events::will_created` previously published `beneficiaries_count: u32`. It
-now publishes the full beneficiary list (`Vec<Beneficiary>`, i.e. address +
-allocation pairs) so an off-chain indexer can reconstruct who a will's
-beneficiaries are directly from the creation event, without a follow-up
-`get_will` call.
-
-This list is bounded by `MAX_BENEFICIARIES` (currently 10) by contract
-validation before the event is published, keeping the payload comfortably
-inside Soroban's per-event size limit. If `MAX_BENEFICIARIES` is raised
-substantially in the future, this event will need to either truncate the
-list (with indexers falling back to `get_will` for the remainder) or split
-across multiple events.
+[Unreleased]: https://github.com/SoroWill/sorowill-contracts/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/SoroWill/sorowill-contracts/releases/tag/v0.1.0

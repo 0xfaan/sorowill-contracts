@@ -15,7 +15,7 @@
 use proptest::prelude::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token::StellarAssetClient,
+    token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, Vec as SorobanVec,
 };
 
@@ -110,6 +110,28 @@ fn create_will_input_strategy() -> impl Strategy<Value = CreateWillInput> {
         )
 }
 
+/// Generates between one and MAX_BENEFICIARIES positive shares whose sum is
+/// exactly 10,000 basis points. Random weights are normalized after reserving
+/// one basis point per beneficiary; truncation dust goes to the last entry.
+fn valid_basis_point_split_strategy() -> impl Strategy<Value = Vec<u32>> {
+    (1usize..=crate::MAX_BENEFICIARIES as usize).prop_flat_map(|count| {
+        prop::collection::vec(1u32..=10_000, count).prop_map(move |weights| {
+            let weight_total: u64 = weights.iter().map(|weight| *weight as u64).sum();
+            let distributable = 10_000u64 - count as u64;
+            let mut allocated = 0u32;
+            let mut shares = Vec::with_capacity(count);
+
+            for weight in weights.iter().take(count - 1) {
+                let share = 1 + (distributable * *weight as u64 / weight_total) as u32;
+                shares.push(share);
+                allocated += share;
+            }
+            shares.push(10_000 - allocated);
+            shares
+        })
+    })
+}
+
 fn update_beneficiaries_input_strategy() -> impl Strategy<Value = UpdateBeneficiariesInput> {
     (
         create_will_input_strategy(),
@@ -143,6 +165,61 @@ proptest! {
             // would mean `get_will` could never find the will again.
             prop_assert!(will_id >= 1);
         }
+    }
+
+    /// Every valid beneficiary split must transfer the complete token balance.
+    /// The public release path exercises `distribute` and its final-recipient
+    /// remainder handling exactly as production does.
+    #[test]
+    fn distribution_conserves_every_valid_balance(
+        basis_points in valid_basis_point_split_strategy(),
+        balance in 1i128..=1_000_000_000i128,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_700_000_000);
+
+        let owner = Address::generate(&env);
+        let sac = env.register_stellar_asset_contract_v2(owner.clone());
+        let token_address = sac.address();
+        StellarAssetClient::new(&env, &token_address).mint(&owner, &balance);
+        let token = TokenClient::new(&env, &token_address);
+
+        let contract_id = env.register(WillContract, ());
+        let client = WillContractClient::new(&env, &contract_id);
+        let mut beneficiaries = SorobanVec::new(&env);
+        let mut beneficiary_addresses = Vec::with_capacity(basis_points.len());
+        for share in basis_points {
+            let address = Address::generate(&env);
+            beneficiary_addresses.push(address.clone());
+            beneficiaries.push_back(Beneficiary {
+                address,
+                basis_points: share,
+            });
+        }
+
+        let will_id = client.create_will(
+            &owner,
+            &vec![&env, (token_address, balance)],
+            &beneficiaries,
+            &90,
+            &7,
+            &vec![&env],
+            &2,
+            &None,
+        );
+        env.ledger().set_timestamp(1_700_000_000 + 91 * 86_400);
+        client.trigger_will(&will_id);
+        env.ledger().set_timestamp(1_700_000_000 + 99 * 86_400);
+        client.release_inheritance(&will_id, &None);
+
+        let transferred: i128 = beneficiary_addresses
+            .iter()
+            .map(|address| token.balance(address))
+            .sum();
+        prop_assert_eq!(transferred, balance);
+        prop_assert_eq!(token.balance(&client.address), 0);
+        prop_assert!(client.get_will(&will_id).balances.is_empty());
     }
 
     /// `update_beneficiaries` must likewise never abort, must leave the will
