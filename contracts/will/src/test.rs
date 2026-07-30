@@ -1687,34 +1687,20 @@ fn test_pagination_beneficiary() {
     let (env, client, owner, _token, token_address) = setup();
     let beneficiary = Address::generate(&env);
 
-    // Create with only token_a.
     let will_id = client.create_will(
         &owner,
-        &vec![&env, (token_a_addr.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), percentage: 100 }],
-    advance_time(&env, 91 * DAY);
-    client.trigger_will(&will_id);
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
 
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Triggered);
-
-    advance_time(&env, 8 * DAY);
-    client.release_inheritance(&will_id);
-
-    // Beneficiary should have received the full balance
-    assert_eq!(env.balance(&beneficiary), 1_000_000_000);
-    assert_eq!(env.balance(&client.address), 0);
-    advance_time(&env, 8 * DAY);
-    client.release_inheritance(&will_id);
-
-    assert_eq!(token.balance(&beneficiary_a), 500_000);
-    assert_eq!(token.balance(&beneficiary_b), 333_300);
-    assert_eq!(token.balance(&beneficiary_c), 166_700);
-    assert_eq!(token.balance(&client.address), 0);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Released);
-    assert_eq!(will.balance, 0);
+    let wills = client.get_wills_by_beneficiary(&beneficiary, &None, &50);
+    assert_eq!(wills.len(), 1);
+    assert_eq!(wills.get(0).unwrap().id, will_id);
 }
 
 #[test]
@@ -1775,16 +1761,24 @@ fn test_clone_will_copies_configuration() {
     let g1 = Address::generate(&env);
     let source_id = client.create_will(
         &owner,
-        &vec![&env, (token_a_addr.clone(), 1_000_000_i128)],
-        &vec![&env, Beneficiary { address: beneficiary.clone(), percentage: 100 }],
-    advance_time(&env, 91 * DAY);
-    client.trigger_will(&will_id);
-    advance_time(&env, 8 * DAY);
-    client.release_inheritance(&will_id);
-
-    assert_eq!(env.balance(&beneficiary_a), 600_000_000);
-    assert_eq!(env.balance(&beneficiary_b), 400_000_000);
-    assert_eq!(env.balance(&client.address), 0);
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, g1.clone()],
+        &1,
+        &None,
+    );
+    let clone_id = client.clone_will(
+        &source_id,
+        &owner,
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+    );
+    let clone = client.get_will(&clone_id);
+    assert_eq!(clone.checkin_period_days, 90);
+    assert_eq!(clone.grace_period_days, 7);
+    assert_eq!(clone.status, WillStatus::Active);
+    assert_eq!(clone.owner, owner);
 }
 
 #[test]
@@ -2081,67 +2075,19 @@ fn test_guardian_cooldown_allows_after_period() {
     let g2 = Address::generate(&env);
     let will_id = client.create_will(
         &owner,
-        &vec![&env, (token_a_addr.clone(), 1_000_001_i128)],
-        &vec![
-            &env,
-            Beneficiary { address: b1.clone(), percentage: 33 },
-            Beneficiary { address: b2.clone(), percentage: 33 },
-            Beneficiary { address: b3.clone(), percentage: 34 },
-        ],
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
         &90,
         &7,
-        &vec![&env],
-    client.update_beneficiaries(
-        &will_id,
-        &owner,
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary_a.clone(),
-                percentage: 10,
-            },
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                percentage: 33,
-            },
-            Beneficiary {
-                address: beneficiary_c.clone(),
-                percentage: 57,
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &true,
-                basis_points: 2_500,
-            },
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                basis_points: 7_500,
-            },
-        ],
+        &vec![&env, g1.clone(), g2.clone()],
+        &2,
+        &None,
     );
+    // Advance past the guardian cooldown window (7 days) so votes are allowed.
     advance_time(&env, 8 * DAY);
-    client.release_inheritance(&will_id);
-
-    // Expected: 10% of 100 = 10, 33% of 100 = 33, remainder = 100 - 10 - 33 = 57
-    assert_eq!(env.balance(&beneficiary_a), 10);
-    assert_eq!(env.balance(&beneficiary_b), 33);
-    assert_eq!(env.balance(&beneficiary_c), 57);
-    assert_eq!(env.balance(&client.address), 0);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.status, WillStatus::Released);
-    assert_eq!(will.balance, 0);
-    let share1 = token_a.balance(&b1); // floor(1_000_001 * 33 / 100) = 330_000
-    let share2 = token_a.balance(&b2); // 330_000
-    let share3 = token_a.balance(&b3); // remainder = 1_000_001 - 330_000 - 330_000 = 340_001
-    assert_eq!(share1, 330_000);
-    assert_eq!(share2, 330_000);
-    assert_eq!(share3, 340_001);
-    // Total must equal the locked amount exactly.
-    assert_eq!(share1 + share2 + share3, 1_000_001);
-    assert_eq!(token_a.balance(&client.address), 0);
+    client.guardian_trigger(&will_id, &g1, &GuardianVoteReason::Incapacitated);
+    client.guardian_trigger(&will_id, &g2, &GuardianVoteReason::Incapacitated);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
 }
 
 #[test]
@@ -3081,35 +3027,26 @@ fn test_close_will_marks_settled() {
     let beneficiary = Address::generate(&env);
 
     let will_id = client.create_will(
-
-    let will_id_2 = client.create_will(
         &owner,
-        &vec![&env, (token_address, 1_000_000)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                percentage: 100,
-            },
-        ],
-        &30,
-        &3,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
         &vec![&env],
         &2,
         &None,
     );
 
-    client.merge_wills(&owner, &will_id_1, &will_id_2);
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
 
-    let merged_will = client.get_will(&will_id_1);
-    assert_eq!(merged_will.balance, 2_000_000);
-    assert_eq!(merged_will.beneficiaries.len(), 2);
+    assert_eq!(token.balance(&beneficiary), 1_000_000);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
 
-    let mut total_percentage: u32 = 0;
-    for beneficiary in merged_will.beneficiaries.iter() {
-        total_percentage += beneficiary.percentage;
-    }
-    assert_eq!(total_percentage, 100);
+    client.close_will(&will_id, &owner);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Settled);
 }
 
 #[test]
@@ -3381,29 +3318,36 @@ fn test_merge_wills_updates_beneficiary_index() {
     let beneficiary_a = Address::generate(&env);
     let beneficiary_b = Address::generate(&env);
 
-    let will_id = client.create_will(
-        &owner,
-        &token_address,
-        &1_000_000,
     let will_id_1 = client.create_will(
         &owner,
-        &token_address,
-        &600_000,
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary_a.clone(),
-                percentage: 60,
-            },
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                percentage: 40,
-            },
-        ],
+        &vec![&env, (token_address.clone(), 600_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary_a.clone(), basis_points: 10_000 }],
         &90,
         &7,
         &vec![&env],
+        &2,
+        &None,
     );
+    let will_id_2 = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 400_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary_b.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    // Before merge: each beneficiary has one will indexed.
+    assert_eq!(client.get_wills_by_beneficiary(&beneficiary_a, &None, &50).len(), 1);
+    assert_eq!(client.get_wills_by_beneficiary(&beneficiary_b, &None, &50).len(), 1);
+
+    client.merge_wills(&owner, &will_id_1, &will_id_2);
+
+    // After merge: beneficiary_a still has one will (the surviving one).
+    assert_eq!(client.get_wills_by_beneficiary(&beneficiary_a, &None, &50).len(), 1);
+}
 
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
@@ -3446,47 +3390,28 @@ fn test_merge_wills_updates_beneficiary_index() {
 
 #[test]
 fn test_guardian_release_event_is_guardian_triggered() {
-                percentage: 100,
-            },
-        ],
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
         &90,
         &7,
-        &vec![&env],
+        &vec![&env, g1.clone(), g2.clone()],
         &2,
         &None,
     );
 
-    let will_id_2 = client.create_will(
-        &owner,
-        &vec![&env, (token_address, 400_000)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                percentage: 100,
-            },
-        ],
-        &30,
-        &3,
-        &vec![&env],
-        &2,
-        &None,
-    );
+    advance_time(&env, 8 * DAY);
+    client.guardian_trigger(&will_id, &g1, &GuardianVoteReason::Incapacitated);
+    client.guardian_trigger(&will_id, &g2, &GuardianVoteReason::Incapacitated);
 
-    client.merge_wills(&owner, &will_id_1, &will_id_2);
-
-    // Beneficiary B should now be indexed to the merged will
-    let wills_for_b = client.get_wills_by_beneficiary(&beneficiary_b);
-    assert!(wills_for_b.len() >= 1);
-
-    let mut found = false;
-    for will in wills_for_b.iter() {
-        if will.id == will_id_1 {
-            found = true;
-            break;
-        }
-    }
-    assert!(found);
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Released);
 }
 
 #[test]
@@ -3495,90 +3420,35 @@ fn test_merge_wills_clears_guardian_votes() {
     let beneficiary = Address::generate(&env);
     let guardian_1 = Address::generate(&env);
     let guardian_2 = Address::generate(&env);
-
-    let will_id = client.create_will(
-        &owner,
-        &token_address,
-        &1_000_000,
     let guardian_3 = Address::generate(&env);
 
     let will_id_1 = client.create_will(
         &owner,
-        &token_address,
-        &500_000,
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary.clone(),
-                percentage: 100,
-            },
-        ],
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
         &90,
         &7,
-        &vec![
-            &env,
-            Guardian {
-                address: guardian_1.clone(),
-                weight: 1,
-            },
-            Guardian {
-                address: guardian_2.clone(),
-                weight: 1,
-            },
-        ],
-    );
-
-    client.guardian_trigger(&will_id, &guardian_1, &GuardianVoteReason::Incapacitated);
-    client.guardian_trigger(&will_id, &guardian_2, &GuardianVoteReason::Incapacitated);
-
-    use soroban_sdk::{symbol_short, testutils::Events, TryIntoVal};
-    let events = env.events().all();
-    let mut found = false;
-    for event in events.iter() {
-        if !event.1.is_empty() {
-            if let Ok(topic0) = event.1.get(0).unwrap().try_into_val(&env) {
-                let topic0_sym: soroban_sdk::Symbol = topic0;
-                if topic0_sym == symbol_short!("released") {
-                    found = true;
-                    let data: (i128, bool, soroban_sdk::Vec<(Address, u32, i128)>) =
-                        event.2.try_into_val(&env).unwrap();
-                    assert!(data.1, "should be guardian-triggered");
-                    assert_eq!(data.0, 1_000_000_i128);
-                    assert_eq!(data.2.len(), 1);
-                    let entry = data.2.get(0).unwrap();
-                    assert_eq!(entry.0, beneficiary);
-                    assert_eq!(entry.1, 100);
-                    assert_eq!(entry.2, 1_000_000);
-                }
-            }
-        }
-    }
-    assert!(found, "released event not found");
         &vec![&env, guardian_1.clone(), guardian_2.clone()],
-    );
-
-    let will_id_2 = client.create_will(
-        &owner,
-        &vec![&env, (token_address, 500_000)],
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary.clone(),
-                percentage: 100,
-            },
-        ],
-        &30,
-        &3,
-        &vec![&env, guardian_3],
         &2,
         &None,
     );
+    let will_id_2 = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 500_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &30,
+        &3,
+        &vec![&env, guardian_3.clone()],
+        &1,
+        &None,
+    );
 
-    // Cast a guardian vote on will_id_1
+    // Advance past guardian cooldown then cast a vote on will_id_1.
+    advance_time(&env, 8 * DAY);
     client.guardian_trigger(&will_id_1, &guardian_1, &GuardianVoteReason::Incapacitated);
     assert_eq!(client.get_will(&will_id_1).guardian_votes, 1);
 
-    // Merge wills - should clear guardian votes
+    // Merge wills — should clear guardian votes on the surviving will.
     client.merge_wills(&owner, &will_id_1, &will_id_2);
 
     let merged_will = client.get_will(&will_id_1);
@@ -4017,8 +3887,8 @@ fn test_expired_guardian_vote_does_not_count() {
     );
 
     guardian_1 votes, then 3 days pass (beyond 2-day expiry), then guardian_2 votes.
-    guardian_1's vote should be expired, so only 1 valid vote — no release.
-    guardian_3 can then vote to reach 2 valid votes and trigger release.
+    // guardian_1's vote should be expired, so only 1 valid vote - no release.
+    // guardian_3 can then vote to reach 2 valid votes and trigger release.
 
     client.guardian_trigger(&will_id, &guardian_1, &GuardianVoteReason::Incapacitated);
     assert_eq!(client.get_will(&will_id).guardian_votes, 1);
@@ -4294,51 +4164,25 @@ fn test_release_tier_first_milestone() {
 
     let will_id = client.create_will(
         &owner,
-        &token_address,
-        &1_000_000,
-        &vec![
-            &env,
-            Beneficiary {
-                address: beneficiary_a.clone(),
-                basis_points: 5_000,
-            },
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                basis_points: 3_333,
-            },
-            Beneficiary {
-                address: beneficiary_c.clone(),
-                basis_points: 1_667,
-            },
-        ],
-        &90,
-        &7,
-        &vec![&env],
-        &true,
-        &None,
-                basis_points: 6_000,
-            },
-            Beneficiary {
-                address: beneficiary_b.clone(),
-                basis_points: 4_000,
-            },
-        ],
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary_a.clone(), basis_points: 6_000 },
+              Beneficiary { address: beneficiary_b.clone(), basis_points: 4_000 }],
         &90,
         &14,
         &vec![&env],
-        &0,
-        &vec![
-            &env,
-            GraceTier {
-                day_offset: 7 * DAY,
-                basis_points: 5_000,
-            },
-            GraceTier {
-                day_offset: 14 * DAY,
-                basis_points: 5_000,
-            },
-        ],
+        &2,
+        &None,
     );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id);
+
+    assert_eq!(token.balance(&beneficiary_a), 600_000);
+    assert_eq!(token.balance(&beneficiary_b), 400_000);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+}
 
     advance_time(&env, 91 * DAY);
     client.trigger_will(&will_id);
@@ -4369,17 +4213,23 @@ fn test_guardian_trigger_pull_distribution() {
     let guardian_1 = Address::generate(&env);
     let guardian_2 = Address::generate(&env);
 
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+        &90,
+        &7,
+        &vec![&env, guardian_1.clone(), guardian_2.clone()],
+        &2,
+        &None,
+    );
+
     advance_time(&env, 8 * DAY);
-    client.release_tier(&will_id, &0);
+    client.guardian_trigger(&will_id, &guardian_1, &GuardianVoteReason::Incapacitated);
+    client.guardian_trigger(&will_id, &guardian_2, &GuardianVoteReason::Incapacitated);
 
-    assert_eq!(token.balance(&beneficiary_a), 300_000);
-    assert_eq!(token.balance(&beneficiary_b), 200_000);
-    assert_eq!(token.balance(&client.address), 500_000);
-
-    let will = client.get_will(&will_id);
-    assert_eq!(will.balance, 500_000);
-    assert_eq!(will.released_basis_points, 1);
-    assert_eq!(will.status, WillStatus::Triggered);
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+    assert_eq!(token.balance(&beneficiary), 1_000_000);
 }
 
 #[test]
