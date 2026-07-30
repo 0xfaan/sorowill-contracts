@@ -25,7 +25,7 @@ SoroWill is a trustless, on-chain inheritance protocol for Stellar Soroban. It l
 5. **Release.** If the grace period expires without an emergency check-in, anyone can call `release_inheritance`, which distributes the locked balance to every beneficiary proportionally, in one transaction.
 6. **Cancel anytime.** While the will is active, the owner can call `cancel_will` to withdraw the full balance.
 7. **Update beneficiaries.** While active, the owner can call `update_beneficiaries` to change who inherits and in what proportions.
-8. **Guardian override.** A will can name up to 3 guardians. Any 2 of them calling `guardian_trigger` force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive.
+8. **Guardian override.** A will can name up to 3 guardians. Any 2 of them calling `guardian_trigger` force an immediate release — useful if the owner is known to be incapacitated rather than simply inactive. See [docs/adr/0001-guardian-threshold.md](./docs/adr/0001-guardian-threshold.md) for the rationale behind the 2-of-3 default, its known limitations, and how it relates to the proposed configurable M-of-N guardian feature.
 
 ## Tech Stack
 
@@ -112,6 +112,8 @@ use will::{MAX_BENEFICIARIES, MAX_GUARDIANS, GUARDIAN_THRESHOLD};
 | `update_beneficiaries` | Replaces the beneficiary list before the will is triggered | `will_id`, `owner`, `beneficiaries` | — |
 | `top_up` | Adds more of the token to an existing will | `will_id`, `owner`, `amount` | — |
 | `get_will` | Reads the full state of a will | `will_id` | `Will` |
+| `get_will_status` | Reads only a will's lifecycle status, without loading the rest of the struct | `will_id` | `WillStatus` |
+| `get_time_until_deadline` | Seconds until the will's next relevant deadline (check-in or grace period); negative if past due, `None` if not applicable to the current status | `will_id` | `Option<i64>` |
 | `get_wills_by_owner` | Lists every will owned by an address | `owner` | `Vec<Will>` |
 | `get_wills_by_beneficiary` | Lists every will an address is named in | `beneficiary` | `Vec<Will>` |
 | `guardian_trigger` | Casts a guardian vote; 2 of 3 forces an early release | `will_id`, `guardian` | — |

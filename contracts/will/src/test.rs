@@ -348,6 +348,156 @@ fn test_cannot_trigger_before_deadline() {
     client.trigger_will(&will_id);
 }
 
+// ── get_will_status / get_time_until_deadline ────────────────────────────────
+
+#[test]
+fn test_get_will_status_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    assert_eq!(client.get_will_status(&will_id), WillStatus::Active);
+    // Matches the status embedded in the full struct.
+    assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+}
+
+#[test]
+fn test_get_will_status_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    assert_eq!(client.get_will_status(&will_id), WillStatus::Triggered);
+}
+
+#[test]
+fn test_get_time_until_deadline_active() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    // Fresh will: ~90 days (in seconds) remain until the check-in deadline.
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(90 * DAY as i64));
+
+    // Halfway through the check-in period, roughly half the time remains.
+    advance_time(&env, 45 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(45 * DAY as i64));
+
+    // Past the deadline but not yet triggered: negative, not None.
+    advance_time(&env, 50 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(-5 * DAY as i64));
+}
+
+#[test]
+fn test_get_time_until_deadline_triggered() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+
+    // Just triggered: the full 7-day grace period remains.
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(7 * DAY as i64));
+
+    // Partway through the grace period.
+    advance_time(&env, 3 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(4 * DAY as i64));
+
+    // Past the grace period but not yet released: negative, not None.
+    advance_time(&env, 10 * DAY);
+    let remaining = client.get_time_until_deadline(&will_id);
+    assert_eq!(remaining, Some(-6 * DAY as i64));
+}
+
+#[test]
+fn test_get_time_until_deadline_none_when_not_applicable() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: beneficiary,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+    client.cancel_will(&will_id, &owner);
+    assert_eq!(client.get_will_status(&will_id), WillStatus::Cancelled);
+    assert_eq!(client.get_time_until_deadline(&will_id), None);
+}
+
 // ── emergency_checkin ────────────────────────────────────────────────────────
 
 #[test]
@@ -678,6 +828,68 @@ fn test_update_beneficiaries() {
     client.update_beneficiaries(&will_id, &owner, &vec![&env, bp(&b, 5_000), bp(&c, 5_000)]);
     assert_eq!(client.get_will(&will_id).beneficiaries.len(), 2);
     assert_eq!(client.get_wills_by_beneficiary(&b, &None, &100).len(), 1);
+}
+
+#[test]
+fn test_update_beneficiaries_event_payload() {
+    let (env, client, owner, _token, token_address) = setup();
+    let original = Address::generate(&env);
+    let b = Address::generate(&env);
+    let c = Address::generate(&env);
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: original,
+                basis_points: 10_000,
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    let new_beneficiaries = SorobanVec::from_array(
+        &env,
+        [
+            Beneficiary {
+                address: b.clone(),
+                basis_points: 4_000,
+            },
+            Beneficiary {
+                address: c.clone(),
+                basis_points: 6_000,
+            },
+        ],
+    );
+    client.update_beneficiaries(&will_id, &owner, &new_beneficiaries);
+
+    use soroban_sdk::{symbol_short, testutils::Events, TryIntoVal};
+    let events = env.events().all();
+    let mut found = false;
+    for event in events.iter() {
+        if !event.1.is_empty() {
+            if let Ok(topic0) = event.1.get(0).unwrap().try_into_val(&env) {
+                let topic0_sym: soroban_sdk::Symbol = topic0;
+                if topic0_sym == symbol_short!("benefup") {
+                    found = true;
+                    let topic1: u64 = event.1.get(1).unwrap().try_into_val(&env).unwrap();
+                    assert_eq!(topic1, will_id);
+                    // data: (owner, beneficiary_count, beneficiaries)
+                    let data: (Address, u32, SorobanVec<Beneficiary>) =
+                        event.2.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, owner);
+                    assert_eq!(data.1, 2);
+                    assert_eq!(data.2, new_beneficiaries);
+                }
+            }
+        }
+    }
+    assert!(found, "benefup event not found");
 }
 
 #[test]

@@ -657,7 +657,13 @@ impl WillContract {
         will.beneficiaries = beneficiaries;
         storage::save_will(&env, &will);
 
-        events::beneficiaries_updated(&env, will_id, &owner);
+        events::beneficiaries_updated(
+            &env,
+            will_id,
+            &owner,
+            will.beneficiaries.len(),
+            &will.beneficiaries,
+        );
     }
 
     /// Allows a beneficiary to renounce their inheritance share in advance.
@@ -1048,6 +1054,63 @@ impl WillContract {
     /// - [`WillError::WillNotFound`] if no will exists with this id.
     pub fn get_will(env: Env, will_id: u64) -> Will {
         load_will(&env, will_id)
+    }
+
+    /// Returns just the lifecycle status of `will_id`, without loading or
+    /// transmitting the rest of the `Will` struct (beneficiaries, guardians,
+    /// balances, etc.).
+    ///
+    /// Intended for polling use cases — e.g. a dashboard checking the status
+    /// of many wills — where the caller only needs the status and calling
+    /// [`Self::get_will`] would mean deserializing and transmitting data it
+    /// throws away.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    pub fn get_will_status(env: Env, will_id: u64) -> WillStatus {
+        load_will(&env, will_id).status
+    }
+
+    /// Returns the number of seconds until `will_id`'s next relevant
+    /// deadline, or `None` if the will's current status has no deadline.
+    ///
+    /// The deadline depends on status:
+    /// - `Active`: seconds until the check-in deadline
+    ///   (`last_checkin + checkin_period_days`).
+    /// - `Triggered`: seconds until the grace period expires
+    ///   (`trigger_time + grace_period_days`).
+    /// - `Released`, `Cancelled`, `Settled`: no deadline applies; returns
+    ///   `None`.
+    ///
+    /// The returned value is negative when the deadline has already passed
+    /// (e.g. an `Active` will whose check-in deadline elapsed but which has
+    /// not yet been `trigger_will`-ed, or a `Triggered` will whose grace
+    /// period has expired but has not yet been released) — callers should
+    /// treat any non-positive value as "actionable now" rather than treating
+    /// only `None` as the past-due signal.
+    ///
+    /// Like [`Self::get_will_status`], this avoids loading and transmitting
+    /// the full `Will` struct for simple polling use cases.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    pub fn get_time_until_deadline(env: Env, will_id: u64) -> Option<i64> {
+        let will = load_will(&env, will_id);
+        let now = env.ledger().timestamp() as i64;
+
+        match will.status {
+            WillStatus::Active => {
+                let deadline =
+                    will.last_checkin as i64 + (will.checkin_period_days * SECONDS_PER_DAY) as i64;
+                Some(deadline - now)
+            }
+            WillStatus::Triggered => {
+                let trigger_time = will.trigger_time.unwrap_or(will.last_checkin) as i64;
+                let deadline = trigger_time + (will.grace_period_days * SECONDS_PER_DAY) as i64;
+                Some(deadline - now)
+            }
+            WillStatus::Released | WillStatus::Cancelled | WillStatus::Settled => None,
+        }
     }
 
     /// Returns aggregate protocol statistics for all wills currently tracked on-chain.
