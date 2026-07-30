@@ -85,6 +85,20 @@ cd fuzz && cargo +nightly fuzz run create_will
 See [docs/FUZZING.md](./docs/FUZZING.md) for the invariants that are checked,
 how to reproduce and minimise a crash, and how to add a target.
 
+## Contract Constants
+
+The following limits are defined as `pub const` in `lib.rs` and re-exported from the crate root. They are the canonical source of truth — off-chain tooling, test harnesses, and SDK integrations should import them directly rather than hardcoding duplicates that can silently drift out of sync.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MAX_BENEFICIARIES` | `10` | Maximum number of beneficiaries per will |
+| `MAX_GUARDIANS` | `3` | Maximum number of guardians per will |
+| `GUARDIAN_THRESHOLD` | `2` | Default number of guardian votes required to force an early release |
+
+```rust
+use will::{MAX_BENEFICIARIES, MAX_GUARDIANS, GUARDIAN_THRESHOLD};
+```
+
 ## Contract Functions
 
 | Function | Description | Parameters | Returns |

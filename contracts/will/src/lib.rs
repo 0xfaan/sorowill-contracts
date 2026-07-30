@@ -99,7 +99,10 @@ pub const CONTRACT_VERSION: u32 = 1_000_000;
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Maximum number of beneficiaries a single will may have.
-const MAX_BENEFICIARIES: u32 = 10;
+///
+/// Re-exported at the crate root so off-chain tooling can reference the
+/// canonical value without hardcoding a duplicate.
+pub const MAX_BENEFICIARIES: u32 = 10;
 
 /// Maximum number of guardians a single will may have.
 ///
@@ -155,6 +158,19 @@ const GUARDIAN_COOLDOWN_DAYS: u64 = 7;
 
 /// Maximum keeper bounty in basis points (100 bps = 1%).
 const MAX_KEEPER_BOUNTY_BPS: u32 = 100;
+
+soroban_sdk::contractmeta!(
+    key = "Description",
+    val = "Trustless on-chain inheritance and dead man's switch protocol for Stellar Soroban"
+);
+soroban_sdk::contractmeta!(
+    key = "Version",
+    val = "0.1.0"
+);
+soroban_sdk::contractmeta!(
+    key = "Homepage",
+    val = "https://github.com/SoroWill/sorowill-contracts"
+);
 
 #[contract]
 pub struct WillContract;
@@ -1055,9 +1071,10 @@ impl WillContract {
         let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
         for id in page.iter() {
-            if let Ok(will) = storage::load_will(&env, id) {
-                wills.push_back(will);
-            }
+            wills.push_back(match storage::load_will(&env, id) {
+                Ok(will) => will,
+                Err(e) => panic_with_error!(&env, e),
+            });
         }
         wills
     }
@@ -1083,10 +1100,12 @@ impl WillContract {
         let ids = storage::get_owner_wills(&env, &owner);
         let mut wills = Vec::new(&env);
         for id in ids.iter() {
-            if let Ok(will) = storage::load_will(&env, id) {
-                if will.status == status {
-                    wills.push_back(will);
-                }
+            let will = match storage::load_will(&env, id) {
+                Ok(w) => w,
+                Err(e) => panic_with_error!(&env, e),
+            };
+            if will.status == status {
+                wills.push_back(will);
             }
         }
         wills
@@ -1097,9 +1116,10 @@ impl WillContract {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
         let mut wills = Vec::new(&env);
         for id in ids.iter() {
-            if let Ok(will) = storage::load_will(&env, id) {
-                wills.push_back(will);
-            }
+            wills.push_back(match storage::load_will(&env, id) {
+                Ok(will) => will,
+                Err(e) => panic_with_error!(&env, e),
+            });
         }
         wills
     }
