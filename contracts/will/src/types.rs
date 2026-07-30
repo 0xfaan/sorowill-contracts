@@ -1,17 +1,35 @@
 use soroban_sdk::{contracttype, Address, Symbol, Vec};
 use soroban_sdk::{contracttype, Address, Map, Vec};
 
-/// A single beneficiary entry: an address and the share of the will's balance
-/// it is entitled to receive when the inheritance is released, expressed in
-/// basis points (1 bp = 0.01 %).
+/// How a beneficiary's share of a will is calculated.
 ///
-/// `basis_points` across all beneficiaries of a will must sum to exactly
-/// 10,000 (i.e. 100 %).
+/// - `Percentage(bp)` is a share expressed in basis points (1 bp = 0.01 %) of
+///   whatever balance remains *after* every `FixedAmount` beneficiary on the
+///   same will has been paid. All `Percentage` shares on a will must sum to
+///   exactly 10,000 (100 % of the remainder).
+/// - `FixedAmount(amount)` entitles the beneficiary to exactly `amount` of
+///   the will's token, paid before any percentage-based split is computed.
+///   The sum of all `FixedAmount` entries on a will can never exceed the
+///   will's balance (enforced by `assert_valid_allocations`).
+///
+/// A single will may mix both kinds: e.g. one beneficiary with a fixed
+/// amount and the rest splitting the remainder by percentage.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Allocation {
+    Percentage(u32),
+    FixedAmount(i128),
+}
+
+/// A single beneficiary entry: an address and how much of the will's balance
+/// it is entitled to receive when the inheritance is released.
+///
+/// See [`Allocation`] for how `allocation` is interpreted and validated.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Beneficiary {
     pub address: Address,
-    pub basis_points: u32,
+    pub allocation: Allocation,
 }
 
 /// A guardian entry: an address paired with a vote weight.
@@ -155,6 +173,12 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Accumulated weight of guardian votes cast toward cancelling the current
+    /// trigger. Reaches quorum at `guardian_threshold`, returning the will to
+    /// `Active` and resetting the check-in deadline.
+    pub guardian_cancel_vote_weight: u32,
+    /// Number of distinct guardians who have voted to cancel the current trigger.
+    pub guardian_cancel_votes: u32,
     /// Number of distinct guardian votes required to force an early release.
     /// Must be between 1 and `guardians.len()`.
     pub guardian_threshold: u32,

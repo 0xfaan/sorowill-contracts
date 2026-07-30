@@ -62,11 +62,8 @@ pub enum WillError {
     KeeperBountyExceedsMax = 19,
     /// Guardian threshold is out of range (must be 1..=guardians.len()).
     InvalidGuardianThreshold = 20,
-    /// The supplied token address does not implement the expected SEP-41
-    /// token interface (e.g. missing `decimals()`). Returned by `create_will`
-    /// when a lightweight upfront probe of the token fails.
-    InvalidToken = 21,
-    /// The `ids` slice passed to `get_wills` exceeds the maximum allowed
-    /// length. Cap the slice to at most `MAX_GET_WILLS_IDS` entries.
-    TooManyIds = 22,
+    /// The sum of every `Allocation::FixedAmount` beneficiary on a will
+    /// exceeds the will's balance, or (for a will with no percentage-based
+    /// beneficiaries at all) does not exactly account for the whole balance.
+    FixedAmountExceedsBalance = 21,
 }
