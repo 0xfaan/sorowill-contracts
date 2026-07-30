@@ -211,6 +211,42 @@ impl WillContract {
     /// - [`WillError::DuplicateGuardian`] if the same guardian is supplied twice.
     /// - [`WillError::InvalidPeriod`] if either period is zero or exceeds
     ///   [`MAX_PERIOD_DAYS`].
+    /// - [`WillError::InvalidToken`] if any supplied token address does not respond to a
+    ///   read-only `decimals()` probe, indicating it is not a valid SEP-41 token.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Set up the environment and register the contract (test harness only).
+    /// let env = Env::default();
+    /// env.mock_all_auths();
+    /// let contract_id = env.register(WillContract, ());
+    /// let client = WillContractClient::new(&env, &contract_id);
+    ///
+    /// // Mint some USDC to the owner via a Stellar Asset Contract.
+    /// let owner = Address::generate(&env);
+    /// let usdc_id = env.register_stellar_asset_contract_v2(owner.clone()).address();
+    /// StellarAssetClient::new(&env, &usdc_id).mint(&owner, &1_000_000);
+    ///
+    /// let beneficiary = Address::generate(&env);
+    ///
+    /// // Create a will: lock 1 USDC, single beneficiary, 90-day check-in,
+    /// // 7-day grace period, no guardians.
+    /// let will_id = client.create_will(
+    ///     &owner,
+    ///     &vec![&env, (usdc_id.clone(), 1_000_000_i128)],
+    ///     &vec![&env, Beneficiary { address: beneficiary.clone(), basis_points: 10_000 }],
+    ///     &90,  // checkin_period_days
+    ///     &7,   // grace_period_days
+    ///     &vec![&env],  // no guardians
+    ///     &1,           // guardian_threshold (ignored when no guardians)
+    ///     &None,        // no keeper bounty
+    /// );
+    ///
+    /// let will = client.get_will(&will_id);
+    /// assert_eq!(will.owner, owner);
+    /// assert_eq!(will.status, WillStatus::Active);
+    /// ```
     #[allow(clippy::too_many_arguments)]
     pub fn create_will(
         env: Env,
@@ -263,6 +299,17 @@ impl WillContract {
         for (token_addr, amount) in tokens.iter() {
             if amount <= 0 {
                 panic_with_error!(&env, WillError::ZeroAmount);
+            }
+            // Probe the token interface with a read-only `decimals()` call
+            // before attempting any transfer. A non-token address (or any
+            // contract that does not implement SEP-41) will fail here with a
+            // clear `InvalidToken` error rather than an opaque host-level
+            // cross-contract failure deep inside `transfer`.
+            if token::Client::new(&env, &token_addr)
+                .try_decimals()
+                .is_err()
+            {
+                panic_with_error!(&env, WillError::InvalidToken);
             }
             // Transfer this token from the owner into the contract.
             token::Client::new(&env, &token_addr).transfer(
@@ -335,6 +382,24 @@ impl WillContract {
 
     /// Resets the check-in countdown for `will_id`. Must be called by the
     /// will's owner or the designated delegate, and the will must be `Active`.
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if no will exists with this id.
+    /// - [`WillError::WillNotActive`] if the will is not `Active`.
+    /// - [`WillError::NotOwner`] if `caller` is neither the owner nor the delegate.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Continuing from a will created with create_will …
+    /// // Advance time to just before the deadline, then check in.
+    /// env.ledger().with_mut(|l| l.timestamp += 80 * 86_400); // 80 days later
+    ///
+    /// client.check_in(&will_id, &owner);
+    ///
+    /// // The countdown resets; the will is still Active.
+    /// assert_eq!(client.get_will(&will_id).status, WillStatus::Active);
+    /// ```
     pub fn check_in(env: Env, will_id: u64, caller: Address) {
         caller.require_auth();
         let mut will = load_will(&env, will_id);
@@ -396,6 +461,19 @@ impl WillContract {
     /// # Panics
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::CheckinNotDue`] if the check-in deadline has not passed yet.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Continuing from a will created with a 90-day check-in period …
+    /// // Advance past the check-in deadline without calling check_in.
+    /// env.ledger().with_mut(|l| l.timestamp += 91 * 86_400); // 91 days later
+    ///
+    /// // Anyone can call trigger_will once the deadline is missed.
+    /// client.trigger_will(&will_id);
+    ///
+    /// assert_eq!(client.get_will(&will_id).status, WillStatus::Triggered);
+    /// ```
     pub fn trigger_will(env: Env, will_id: u64) {
         let mut will = load_will(&env, will_id);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
@@ -501,6 +579,21 @@ impl WillContract {
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Continuing from a triggered will with a 7-day grace period …
+    /// // Advance past the grace period without calling emergency_checkin.
+    /// env.ledger().with_mut(|l| l.timestamp += 8 * 86_400); // 8 days after trigger
+    ///
+    /// // Anyone can release once the grace period has fully elapsed.
+    /// client.release_inheritance(&will_id, &None);
+    ///
+    /// // Funds have been distributed; the will is now Released.
+    /// assert_eq!(client.get_will(&will_id).status, WillStatus::Released);
+    /// // Each beneficiary's token balance reflects their basis-point share.
+    /// ```
     pub fn release_inheritance(env: Env, will_id: u64, caller: Option<Address>) {
         let mut will = load_will(&env, will_id);
         assert_status(
@@ -1183,6 +1276,53 @@ impl WillContract {
                 Ok(will) => will,
                 Err(e) => panic_with_error!(&env, e),
             });
+        }
+        wills
+    }
+
+    /// Fetches a caller-chosen set of wills by their ids in a single call.
+    ///
+    /// This is useful for application dashboards that already know a handful
+    /// of relevant will ids (e.g. collected from prior events) and want a
+    /// fresh read of just those wills without re-deriving the owner/beneficiary
+    /// indexes.
+    ///
+    /// # Parameters
+    /// - `ids`: the list of will ids to fetch. Must not exceed
+    ///   [`MAX_GET_WILLS_IDS`] entries.
+    ///
+    /// # Returns
+    /// A `Vec<Will>` containing only the wills that exist. Any id that does
+    /// not map to a stored will is silently skipped (no panic). The result
+    /// preserves the input order, minus the missing ids.
+    ///
+    /// **Skipping vs. panicking:** the owner/beneficiary index functions
+    /// (`get_wills_by_owner`, `get_wills_by_beneficiary`) also skip missing
+    /// ids for the same reason — stale index entries can arise after a will
+    /// is cancelled or released. `get_wills` follows the same convention so
+    /// callers can safely pass any id without error-handling overhead.
+    ///
+    /// # Panics
+    /// - [`WillError::TooManyIds`] if `ids.len()` exceeds `MAX_GET_WILLS_IDS`.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Fetch a specific set of will ids, including one that does not exist.
+    /// let wills = client.get_wills(&vec![&env, will_id_a, will_id_b, 9999_u64]);
+    ///
+    /// // Only the two real wills are returned; 9999 is silently skipped.
+    /// assert_eq!(wills.len(), 2);
+    /// ```
+    pub fn get_wills(env: Env, ids: Vec<u64>) -> Vec<Will> {
+        if ids.len() > MAX_GET_WILLS_IDS {
+            panic_with_error!(&env, WillError::TooManyIds);
+        }
+        let mut wills = Vec::new(&env);
+        for id in ids.iter() {
+            if let Ok(will) = storage::load_will(&env, id) {
+                wills.push_back(will);
+            }
         }
         wills
     }
