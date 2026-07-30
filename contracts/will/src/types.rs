@@ -173,6 +173,12 @@ pub struct Will {
     /// Number of distinct guardians who have voted to trigger the current
     /// guardian-release cycle.
     pub guardian_votes: u32,
+    /// Accumulated weight of guardian votes cast toward cancelling the current
+    /// trigger. Reaches quorum at `guardian_threshold`, returning the will to
+    /// `Active` and resetting the check-in deadline.
+    pub guardian_cancel_vote_weight: u32,
+    /// Number of distinct guardians who have voted to cancel the current trigger.
+    pub guardian_cancel_votes: u32,
     /// Number of distinct guardian votes required to force an early release.
     /// Must be between 1 and `guardians.len()`.
     pub guardian_threshold: u32,
