@@ -41,8 +41,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    Beneficiary, Will, WillContract, WillContractClient, WillStatus, MAX_BENEFICIARIES,
-    MAX_GUARDIANS, MAX_PERIOD_DAYS, MAX_TOKENS, SECONDS_PER_DAY,
+    Allocation, Beneficiary, Will, WillContract, WillContractClient, WillStatus,
+    MAX_BENEFICIARIES, MAX_GUARDIANS, MAX_PERIOD_DAYS, MAX_TOKENS, SECONDS_PER_DAY,
 };
 
 /// Number of distinct addresses the fuzzer picks from.
@@ -160,7 +160,7 @@ fn to_beneficiaries(
     for spec in specs.iter().take(MAX_FUZZ_BENEFICIARIES) {
         out.push_back(Beneficiary {
             address: slot(pool, spec.address_slot),
-            basis_points: spec.basis_points,
+            allocation: Allocation::Percentage(spec.basis_points),
         });
     }
     out
@@ -181,7 +181,7 @@ fn to_guardians(env: &Env, pool: &SorobanVec<Address>, slots: &[u8]) -> SorobanV
 ///
 /// Address slots are left untouched, so duplicate beneficiaries survive
 /// sanitisation and keep getting exercised.
-fn sanitize_specs(specs: &[BeneficiarySpec]) -> Vec<BeneficiarySpec> {
+pub fn sanitize_specs(specs: &[BeneficiarySpec]) -> Vec<BeneficiarySpec> {
     let mut out: Vec<BeneficiarySpec> = specs
         .iter()
         .take(MAX_BENEFICIARIES as usize)
@@ -373,7 +373,10 @@ fn assert_created_will(
     );
     let mut total: u128 = 0;
     for beneficiary in will.beneficiaries.iter() {
-        total += beneficiary.basis_points as u128;
+        total += match beneficiary.allocation {
+            Allocation::Percentage(bp) => bp as u128,
+            Allocation::FixedAmount(_) => 0,
+        };
     }
     check(total == 10_000, input, "beneficiary basis points do not sum to 10,000");
 
@@ -636,7 +639,10 @@ fn assert_updated_beneficiaries(
     );
     let mut total: u128 = 0;
     for beneficiary in will.beneficiaries.iter() {
-        total += beneficiary.basis_points as u128;
+        total += match beneficiary.allocation {
+            Allocation::Percentage(bp) => bp as u128,
+            Allocation::FixedAmount(_) => 0,
+        };
     }
     check(total == 10_000, input, "beneficiary basis points do not sum to 10,000 after an update");
 

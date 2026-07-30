@@ -7,7 +7,7 @@
 //! `(will_id, guardian)` pair with a timestamp so they can expire over time,
 //! and cleared independently when a guardian-release cycle resets.
 
-use soroban_sdk::{contracttype, panic_with_error, Address, Env, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, Env, Vec};
 
 use crate::errors::WillError;
 use crate::types::{Guardian, GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition};
@@ -40,6 +40,9 @@ pub(crate) enum DataKey {
     BeneficiaryWills(Address),
     /// A guardian's vote record: stores `(timestamp, reason)` for time-weighted expiry.
     GuardianVote(u64, Address),
+    /// A guardian's cancel-trigger vote record: separate namespace so release
+    /// votes and cancel votes cannot interfere with each other.
+    GuardianCancelVote(u64, Address),
     /// Audit trail of status transitions for a will.
     WillHistory(u64),
     /// Archived state of a will that has been Released or Cancelled.
@@ -383,6 +386,57 @@ pub fn reset_guardian_votes(env: &Env, will: &Will) {
     }
     for guardian in will.guardians.iter() {
         let key = DataKey::GuardianVote(will.id, guardian.address.clone());
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Returns whether `guardian` has a non-expired cancel vote in the current
+/// cycle for `will_id`.
+pub fn has_guardian_cancel_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    now: u64,
+    expiry_days: u64,
+) -> bool {
+    let key = DataKey::GuardianCancelVote(will_id, guardian.clone());
+    if let Some(record) = env.storage().persistent().get::<_, GuardianVoteRecord>(&key) {
+        let expiry_secs = expiry_days * SECONDS_PER_DAY;
+        now - record.timestamp <= expiry_secs
+    } else {
+        false
+    }
+}
+
+/// Records that `guardian` has cast a cancel-trigger vote for `will_id`.
+pub fn set_guardian_cancel_voted(
+    env: &Env,
+    will_id: u64,
+    guardian: &Address,
+    timestamp: u64,
+) {
+    let key = DataKey::GuardianCancelVote(will_id, guardian.clone());
+    let record = GuardianVoteRecord {
+        timestamp,
+        reason: GuardianVoteReason::Other,
+    };
+    env.storage().persistent().set(&key, &record);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Clears all guardian cancel-trigger votes for `will`, starting a fresh cycle.
+///
+/// Called when a cancel-trigger vote reaches quorum (returning the will to
+/// `Active`) so the cancel-vote counters are clean for any future triggered state.
+/// Skipped when `guardian_cancel_votes == 0` to avoid unnecessary storage reads.
+pub fn reset_guardian_cancel_votes(env: &Env, will: &Will) {
+    if will.guardian_cancel_votes == 0 {
+        return;
+    }
+    for guardian in will.guardians.iter() {
+        let key = DataKey::GuardianCancelVote(will.id, guardian.address.clone());
         env.storage().persistent().remove(&key);
     }
 }
