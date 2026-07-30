@@ -497,6 +497,89 @@ fn test_release_inheritance_rounding_remainder() {
 }
 
 #[test]
+fn test_release_inheritance_rolls_back_when_one_beneficiary_rejects_transfer() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let total = 1_000_000_i128;
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), total)],
+        &vec![
+            &env,
+            bp(&beneficiary_a, 6_000),
+            bp(&beneficiary_b, 4_000),
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+
+    // The first transfer would succeed, but the second beneficiary is frozen
+    // and cannot receive this Stellar asset.
+    StellarAssetClient::new(&env, &token_address)
+        .set_authorized(&beneficiary_b, &false);
+
+    assert!(client.try_release_inheritance(&will_id, &None).is_err());
+
+    // Soroban rolls the entire invocation back: the earlier transfer and all
+    // of distribute's state changes must be absent.
+    assert_eq!(token.balance(&beneficiary_a), 0);
+    assert_eq!(token.balance(&beneficiary_b), 0);
+    assert_eq!(token.balance(&client.address), total);
+
+    let will = client.get_will(&will_id);
+    assert_eq!(will.status, WillStatus::Triggered);
+    assert_eq!(will.balances.get(token_address).unwrap(), total);
+}
+
+#[test]
+fn test_release_inheritance_handles_near_maximum_balance_without_overflow() {
+    let (env, client, owner, token, token_address) = setup();
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+    let total = i128::MAX;
+
+    // setup funds the owner with 1_000_000_000 units; extend that balance to
+    // the largest positive amount the Stellar test token can represent.
+    StellarAssetClient::new(&env, &token_address)
+        .mint(&owner, &(total - 1_000_000_000));
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address, total)],
+        &vec![
+            &env,
+            bp(&beneficiary_a, 6_000),
+            bp(&beneficiary_b, 4_000),
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+
+    advance_time(&env, 91 * DAY);
+    client.trigger_will(&will_id);
+    advance_time(&env, 8 * DAY);
+    client.release_inheritance(&will_id, &None);
+
+    let expected_a = (total / 10_000) * 6_000
+        + (total % 10_000) * 6_000 / 10_000;
+    assert_eq!(token.balance(&beneficiary_a), expected_a);
+    assert_eq!(token.balance(&beneficiary_b), total - expected_a);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+#[test]
 fn test_release_multi_token_proportionally() {
     let (env, client, owner, token_a, token_a_addr, token_b, token_b_addr) = setup_two_tokens();
     let a = Address::generate(&env);
@@ -3603,7 +3686,7 @@ fn test_archive_triggered_will_rejected() {
 
 // ── Issue #11: Pull-based beneficiary claim tests ────────────────────────────
 
-/// Pull-mode distribute stores claimable shares instead of transferring tokens.
+/// Pull-mode distribute'stores claimable shares instead of transferring tokens.
 #[test]
 fn test_pull_distribution_stores_shares() {
     let (env, client, owner, token, token_address) = setup();

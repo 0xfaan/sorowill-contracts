@@ -22,10 +22,19 @@ For example: `feat/42-guardian-quorum-check` or `fix/17-checkin-deadline-roundin
 ## Pull requests
 
 - Your PR description must reference the issue it resolves (e.g. `Closes #42`).
-- Make sure `cargo test` and `cargo clippy --all-targets` both pass cleanly before requesting review.
+- Complete the [Before opening a PR](#before-opening-a-pr) checklist before requesting review.
 - Add or update unit tests for any behavior change in `contracts/will/src/test.rs`.
 - If you change validation rules or add an entry point, extend the fuzzing
   harness too — see [docs/FUZZING.md](./docs/FUZZING.md#adding-a-target).
+
+## Before opening a PR
+
+Run every command used by the [Test CI workflow](./.github/workflows/test.yml) and confirm it succeeds:
+
+- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
+- [ ] `cargo build --workspace --release --target wasm32v1-none`
+- [ ] Confirm the Test workflow is green on the PR.
 
 ## Local setup
 

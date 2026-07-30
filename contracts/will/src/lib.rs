@@ -1657,6 +1657,19 @@ fn assert_valid_periods(env: &Env, checkin_period_days: u64, grace_period_days: 
 /// amounts are computed from the pre-mutation balances, then all state is
 /// committed (status, balances, indexes), and only then are the external
 /// token transfers executed.
+/// Calculates `floor(total * basis_points / 10_000)` without ever forming
+/// the potentially overflowing `total * basis_points` intermediate. The
+/// workspace release profile enables overflow checks, but this decomposition
+/// also makes the calculation safe independently of that compiler setting.
+fn proportional_share(total: i128, basis_points: u32) -> i128 {
+    const BASIS_POINTS_TOTAL: i128 = 10_000;
+
+    let whole = total / BASIS_POINTS_TOTAL;
+    let remainder = total % BASIS_POINTS_TOTAL;
+    whole * basis_points as i128
+        + remainder * basis_points as i128 / BASIS_POINTS_TOTAL
+}
+
 fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
     let contract_address = env.current_contract_address();
     let count = will.beneficiaries.len();
@@ -1681,7 +1694,7 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
 
         // Calculate bounty from first token's balance if applicable
         if should_pay_bounty && bounty_amount == 0 {
-            bounty_amount = (total * (will.keeper_bounty_bps as i128)) / 10_000;
+            bounty_amount = proportional_share(total, will.keeper_bounty_bps);
         }
 
         let mut shares: Vec<(Address, i128)> = Vec::new(env);
@@ -1690,7 +1703,7 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
             let share = if index as u32 == count - 1 {
                 remaining
             } else {
-                let portion = total * (beneficiary.basis_points as i128) / 10_000;
+                let portion = proportional_share(total, beneficiary.basis_points);
                 remaining -= portion;
                 portion
             };
@@ -1835,7 +1848,7 @@ fn distribute_tier(env: &Env, will: &mut Will, amount: i128) {
         let share = if index as u32 == count - 1 {
             remaining
         } else {
-            let portion = amount * (beneficiary.basis_points as i128) / 10_000;
+            let portion = proportional_share(amount, beneficiary.basis_points);
             remaining -= portion;
             portion
         };
