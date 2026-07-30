@@ -174,3 +174,45 @@ fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
     assert_eq!(token.balance(&sister), 200_000);
     assert_eq!(token.balance(&rest), 1_300_000);
 }
+
+/// create_will must panic when the beneficiary list exceeds MAX_BENEFICIARIES (10).
+///
+/// The contract rejects oversized lists with
+/// `panic_with_error!(WillError::TooManyBeneficiaries)` (code 12).
+/// Supplying 11 beneficiaries (one more than the maximum) exercises that path.
+///
+/// All 11 allocations are `Percentage` values summing to 10,000 basis points,
+/// so only the *count* check fires — not the percentage-sum validation. This
+/// isolates the MAX_BENEFICIARIES guard specifically.
+#[test]
+#[should_panic]
+fn create_will_rejects_more_than_max_beneficiaries() {
+    let (env, client, owner, _token, token_address) = setup();
+
+    // MAX_BENEFICIARIES = 10; build 11 entries. Each gets 909 bp except the
+    // last which gets 901 bp so the total is exactly 10,000 bp.
+    // (10 × 909 + 901 = 9_090 + 901 = 9_991 — adjust: 10 × 900 + 1_000 = 10_000)
+    // Simpler: 10 entries × 909 bp + 1 entry × 910 bp = 9_090 + 910 = 10_000.
+    let mut beneficiaries: SorobanVec<Beneficiary> = SorobanVec::new(&env);
+    for i in 0..11_u32 {
+        let bp = if i < 10 { 909 } else { 910 };
+        beneficiaries.push_back(Beneficiary {
+            address: Address::generate(&env),
+            allocation: Allocation::Percentage(bp),
+        });
+    }
+
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+
+    // Expected: WillError::TooManyBeneficiaries (code 12).
+    client.create_will(
+        &owner,
+        &tokens,
+        &beneficiaries, // 11 beneficiaries > MAX_BENEFICIARIES (10)
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+    );
+}
