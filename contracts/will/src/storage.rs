@@ -12,14 +12,51 @@ use soroban_sdk::{contracttype, Address, Bytes, Env, Vec};
 use crate::errors::WillError;
 use crate::types::{Guardian, GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition};
 
-/// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
-/// is approximately 17,280 ledgers.
-const DAY_IN_LEDGERS: u32 = 17_280;
+/// Number of ledgers in one calendar day, assuming a **5-second average ledger
+/// close time** on the Stellar network.
+///
+/// ```text
+/// 86,400 seconds/day ÷ 5 seconds/ledger = 17,280 ledgers/day
+/// ```
+///
+/// ## What to change if the network's close time shifts
+///
+/// If Stellar's average close time moves away from 5 seconds (it has drifted
+/// historically as the network has evolved), update this constant to reflect
+/// the new average:
+///
+/// ```text
+/// new_value = 86_400 / new_average_close_time_in_seconds
+/// ```
+///
+/// The change automatically propagates to `LIFETIME_THRESHOLD` and
+/// `BUMP_AMOUNT` below, keeping the wall-clock safety margin intact without
+/// requiring any further edits.
+///
+/// A redeployment is required to activate the updated value, because this
+/// constant is compiled into the `.wasm` binary and is not configurable at
+/// runtime.
+///
+/// ## Safety margin against close-time drift
+///
+/// `LIFETIME_THRESHOLD` and `BUMP_AMOUNT` are expressed as multiples of
+/// `DAY_IN_LEDGERS` (30 days and 60 days respectively). This wide margin
+/// deliberately over-provisions storage rent so that moderate close-time
+/// drift — e.g. the average moving from 5 s to 6 s — does not immediately
+/// imperil active wills: the bumped TTL would still cover roughly 50 real
+/// days instead of 60, which is more than enough runway to notice and redeploy.
+/// Only a sustained, large deviation (close time roughly doubling) would
+/// shrink the effective window below a safe threshold.
+const DAY_IN_LEDGERS: u32 = 17_280; // 86_400 s/day ÷ 5 s/ledger
 
-/// Extend TTL once remaining lifetime drops below this many ledgers.
+/// Extend TTL once remaining lifetime drops below this many ledgers (~30 days
+/// at the current 5-second close time; see `DAY_IN_LEDGERS` for how to adjust
+/// this if the network's average close time changes).
 const LIFETIME_THRESHOLD: u32 = DAY_IN_LEDGERS * 30;
 
-/// Extend TTL out to this many ledgers when a bump is triggered.
+/// Extend TTL out to this many ledgers when a bump is triggered (~60 days at
+/// the current 5-second close time; see `DAY_IN_LEDGERS` for adjustment
+/// guidance and the rationale for the extra safety margin).
 const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
 
 /// Seconds in a day, used to convert day-denominated expiry windows.
@@ -64,11 +101,26 @@ pub struct GuardianVoteRecord {
 }
 
 /// Allocates and returns the next available will id, starting at `1`.
+///
+/// Also extends the contract instance's TTL on every call so the `NextWillId`
+/// counter — and all other instance-storage entries — stay live for at least
+/// [`LIFETIME_THRESHOLD`] more ledgers, with a bump to [`BUMP_AMOUNT`] when
+/// that threshold is crossed. These constants mirror the values used for every
+/// persistent-storage entry in the contract so the instance lifecycle is
+/// managed consistently with the rest of the on-chain state.
 pub fn next_will_id(env: &Env) -> u64 {
     let key = DataKey::NextWillId;
     let current: u64 = env.storage().instance().get(&key).unwrap_or(0);
     let next = current + 1;
     env.storage().instance().set(&key, &next);
+    // Keep the contract instance alive for as long as the longest-lived will
+    // it could ever serve. Without an explicit bump here, the instance TTL is
+    // only extended by whatever the platform applies automatically (if
+    // anything), whereas every other storage entry in this codebase bumps its
+    // own TTL. This call brings instance storage in line with that policy.
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
     next
 }
 
@@ -164,6 +216,13 @@ pub fn load_will(env: &Env, will_id: u64) -> Result<Will, WillError> {
 
 /// Adds `will_id` to the index list stored at `key`, if not already present.
 ///
+/// Enforces [`MAX_WILLS_PER_INDEX`]: if the list is already at the cap and
+/// `will_id` is not already in it, this panics with [`WillError::TooManyWills`]
+/// before any write happens. This prevents the serialised `Vec<u64>` from
+/// growing large enough to hit Soroban's per-entry size ceiling, which would
+/// cause a mid-`create_will` failure after the token transfer has already
+/// succeeded.
+///
 /// The write and the TTL bump are skipped when the id is already indexed: the
 /// resulting entry would be byte-for-byte identical, so paying to store it
 /// again buys nothing.
@@ -174,6 +233,9 @@ fn index_push(env: &Env, key: DataKey, will_id: u64) {
         .get(&key)
         .unwrap_or_else(|| Vec::new(env));
     if !ids.contains(will_id) {
+        if ids.len() >= MAX_WILLS_PER_INDEX {
+            panic_with_error!(env, WillError::TooManyWills);
+        }
         ids.push_back(will_id);
         env.storage().persistent().set(&key, &ids);
         env.storage()
@@ -442,6 +504,30 @@ pub fn paginate_ids(env: &Env, ids: &Vec<u64>, cursor: Option<u64>, limit: u32) 
     }
     result
 }
+
+/// Maximum number of will ids that a single address may have in its owner or
+/// beneficiary index vector (`OwnerWills` / `BeneficiaryWills`).
+///
+/// Soroban persistent ledger entries have an upper bound on their serialized
+/// size. An unbounded `Vec<u64>` index would eventually exceed that ceiling,
+/// causing the append to fail mid-`create_will` — after the token transfer has
+/// already succeeded — and permanently blocking any further creates for that
+/// address. Capping the vector well below the theoretical limit prevents that
+/// hard failure.
+///
+/// 1 000 entries × 8 bytes each = 8 KB of raw id data, comfortably inside
+/// Soroban's max entry size and large enough to accommodate any realistic
+/// on-chain use case.
+///
+/// When the cap is reached, [`WillError::TooManyWills`] is returned before the
+/// token transfer happens, so no funds are ever locked in an un-indexable will.
+#[cfg(not(test))]
+pub const MAX_WILLS_PER_INDEX: u32 = 1_000;
+
+/// Lowered cap used in unit tests so the limit can be exercised without
+/// creating thousands of wills.
+#[cfg(test)]
+pub const MAX_WILLS_PER_INDEX: u32 = 5;
 
 /// Maximum number of wills returned per page.
 pub const MAX_PAGE_SIZE: u32 = 50;
