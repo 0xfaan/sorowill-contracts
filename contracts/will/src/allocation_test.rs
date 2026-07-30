@@ -174,3 +174,44 @@ fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
     assert_eq!(token.balance(&sister), 200_000);
     assert_eq!(token.balance(&rest), 1_300_000);
 }
+
+/// create_will must panic when the guardian list exceeds MAX_GUARDIANS (3).
+///
+/// The contract enforces this via `assert_valid_guardians`, which calls
+/// `panic_with_error!(WillError::TooManyBeneficiaries)` when
+/// `guardians.len() > MAX_GUARDIANS`. Supplying 4 guardians (one more than
+/// the maximum) exercises that rejection path.
+///
+/// Note: the error reuses `WillError::TooManyBeneficiaries` (code 12) for
+/// the guardian-count check as well as the beneficiary-count check.
+#[test]
+#[should_panic]
+fn create_will_rejects_more_than_max_guardians() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    // MAX_GUARDIANS = 3; supply 4 to trigger the rejection.
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let g3 = Address::generate(&env);
+    let g4 = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary { address: beneficiary, allocation: Allocation::Percentage(10_000) },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+
+    // Expected: WillError::TooManyBeneficiaries (code 12) — the contract
+    // reuses this error for guardian-list overflow via assert_valid_guardians.
+    client.create_will(
+        &owner,
+        &tokens,
+        &beneficiaries,
+        &90,
+        &7,
+        &vec![&env, g1, g2, g3, g4], // 4 guardians > MAX_GUARDIANS (3)
+        &2,
+        &None,
+    );
+}
