@@ -12,9 +12,17 @@ doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
+# Only pulled in by the `fuzzing` feature, for deriving `Arbitrary` on the
+# fuzz harness input types.
+arbitrary = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+proptest = "1.5"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+# Exposes `will::fuzz_harness` to out-of-crate fuzzing front-ends (the
+# cargo-fuzz targets under `fuzz/`). Enabling it links `std` and the Soroban
+# test host, so it must never be enabled for a wasm build. See docs/FUZZING.md.
+fuzzing = ["soroban-sdk/testutils", "dep:arbitrary"]

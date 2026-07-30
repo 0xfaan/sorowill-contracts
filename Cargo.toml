@@ -1,19 +1,30 @@
 [workspace]
 resolver = "2"
 members = ["contracts/will"]
+# `fuzz` is a self-contained crate that needs a nightly toolchain and
+# libFuzzer. Keeping it out of the workspace means `cargo test --workspace`
+# and `cargo clippy --all-targets` stay on stable. See docs/FUZZING.md.
+exclude = ["fuzz"]
 
 [workspace.dependencies]
 soroban-sdk = { version = "22.0.0" }
 
+# Tuned for WASM binary size, since Soroban charges resource fees partly on
+# contract code size and a smaller binary is also marginally cheaper to
+# invoke. See docs/WASM_SIZE.md for the measurement procedure and the
+# reasoning behind each setting below.
 [profile.release]
-opt-level = "z"
-overflow-checks = true
+opt-level = "z"        # optimize for size over speed (vs "s"/3)
+overflow-checks = true # kept on deliberately: cheap, and silent i128/u64
+                        # wraparound in balance/period math is worse than a
+                        # few extra bytes of checked-arith code
 debug = 0
 strip = "symbols"
 debug-assertions = false
-panic = "abort"
-codegen-units = 1
-lto = true
+panic = "abort"         # no unwinding tables; compatible with no_std here
+codegen-units = 1        # single codegen unit enables cross-function inlining
+                          # and dead-code elimination that -Cunits>1 cannot do
+lto = true                # full LTO, needed for codegen-units=1 to pay off
 
 [profile.release-with-logs]
 inherits = "release"
