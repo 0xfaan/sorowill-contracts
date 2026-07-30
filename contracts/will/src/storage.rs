@@ -12,14 +12,51 @@ use soroban_sdk::{contracttype, Address, Bytes, Env, Vec};
 use crate::errors::WillError;
 use crate::types::{Guardian, GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition};
 
-/// Ledgers correspond to roughly 5 seconds on the Stellar network, so one day
-/// is approximately 17,280 ledgers.
-const DAY_IN_LEDGERS: u32 = 17_280;
+/// Number of ledgers in one calendar day, assuming a **5-second average ledger
+/// close time** on the Stellar network.
+///
+/// ```text
+/// 86,400 seconds/day ÷ 5 seconds/ledger = 17,280 ledgers/day
+/// ```
+///
+/// ## What to change if the network's close time shifts
+///
+/// If Stellar's average close time moves away from 5 seconds (it has drifted
+/// historically as the network has evolved), update this constant to reflect
+/// the new average:
+///
+/// ```text
+/// new_value = 86_400 / new_average_close_time_in_seconds
+/// ```
+///
+/// The change automatically propagates to `LIFETIME_THRESHOLD` and
+/// `BUMP_AMOUNT` below, keeping the wall-clock safety margin intact without
+/// requiring any further edits.
+///
+/// A redeployment is required to activate the updated value, because this
+/// constant is compiled into the `.wasm` binary and is not configurable at
+/// runtime.
+///
+/// ## Safety margin against close-time drift
+///
+/// `LIFETIME_THRESHOLD` and `BUMP_AMOUNT` are expressed as multiples of
+/// `DAY_IN_LEDGERS` (30 days and 60 days respectively). This wide margin
+/// deliberately over-provisions storage rent so that moderate close-time
+/// drift — e.g. the average moving from 5 s to 6 s — does not immediately
+/// imperil active wills: the bumped TTL would still cover roughly 50 real
+/// days instead of 60, which is more than enough runway to notice and redeploy.
+/// Only a sustained, large deviation (close time roughly doubling) would
+/// shrink the effective window below a safe threshold.
+const DAY_IN_LEDGERS: u32 = 17_280; // 86_400 s/day ÷ 5 s/ledger
 
-/// Extend TTL once remaining lifetime drops below this many ledgers.
+/// Extend TTL once remaining lifetime drops below this many ledgers (~30 days
+/// at the current 5-second close time; see `DAY_IN_LEDGERS` for how to adjust
+/// this if the network's average close time changes).
 const LIFETIME_THRESHOLD: u32 = DAY_IN_LEDGERS * 30;
 
-/// Extend TTL out to this many ledgers when a bump is triggered.
+/// Extend TTL out to this many ledgers when a bump is triggered (~60 days at
+/// the current 5-second close time; see `DAY_IN_LEDGERS` for adjustment
+/// guidance and the rationale for the extra safety margin).
 const BUMP_AMOUNT: u32 = DAY_IN_LEDGERS * 60;
 
 /// Seconds in a day, used to convert day-denominated expiry windows.
