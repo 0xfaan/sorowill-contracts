@@ -114,7 +114,7 @@ fn test_create_will_success() {
         &owner,
         &vec![&env, (token_address.clone(), 1_000_000_i128)],
         &vec![
-            &env,
+            env,
             Beneficiary {
                 address: beneficiary.clone(),
                 basis_points: 10_000,

@@ -7,7 +7,7 @@
 //! `(will_id, guardian)` pair with a timestamp so they can expire over time,
 //! and cleared independently when a guardian-release cycle resets.
 
-use soroban_sdk::{contracttype, Address, Env, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, Env, Vec};
 
 use crate::errors::WillError;
 use crate::types::{Guardian, GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition};

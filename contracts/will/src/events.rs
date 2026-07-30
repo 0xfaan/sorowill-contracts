@@ -46,6 +46,12 @@ pub fn will_created(
     );
 }
 
+/// Published when the owner confirms a pending will, moving it to Active (issue #43).
+pub fn will_confirmed(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("confirmed"), will_id), owner.clone());
+}
+
 /// Published when the owner checks in, resetting the check-in deadline.
 pub fn check_in(env: &Env, will_id: u64, owner: &Address, next_deadline: u64) {
     env.events().publish(
@@ -260,5 +266,22 @@ pub fn keeper_bounty_paid(env: &Env, will_id: u64, keeper: &Address, amount: i12
     env.events().publish(
         (symbol_short!("bounty"), will_id),
         (keeper.clone(), amount),
+    );
+}
+
+/// Published when a will is split into two independent wills (issue #45).
+pub fn will_split(env: &Env, original_id: u64, new_id: u64, owner: &Address, split_amount: i128) {
+    env.events().publish(
+        (symbol_short!("split"), original_id),
+        (new_id, owner.clone(), split_amount),
+    );
+}
+
+/// Published when a hashed-beneficiary reveals their pre-image and claims
+/// their share (issue #46).
+pub fn hashed_claimed(env: &Env, will_id: u64, claimant: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("hclaim"), will_id),
+        (claimant.clone(), amount),
     );
 }
