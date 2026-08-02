@@ -206,6 +206,35 @@ pub fn save_will(env: &Env, will: &Will) {
 }
 
 /// Loads a will by id, returning `WillError::WillNotFound` if it does not exist.
+///
+/// # Archived-entry limitation (issue #166)
+///
+/// Soroban's persistent-storage API does not expose *why* a key is absent.
+/// This function therefore maps every `None` result to
+/// [`WillError::WillNotFound`], which conflates three materially different
+/// situations:
+///
+/// 1. **Never created** — the id was never allocated by `create_will`.
+/// 2. **Explicitly archived** — the will reached a terminal state and was
+///    moved to the `ArchivedWill` namespace by [`archive_will`].
+/// 3. **TTL-archived by the network** — the will's persistent entry lapsed
+///    (terminal wills no longer renew their TTL, see [`save_will`]) and was
+///    archived by Soroban once its TTL hit zero.
+///
+/// With soroban-sdk 22 there is **no API to distinguish an archived-but-
+/// existing entry from a truly absent one**: `has`/`get` treat archived keys
+/// as missing (in the test host they surface a testing-only diagnostic; on
+/// the live network an invocation that touches an archived entry fails at the
+/// host level before contract code runs). Callers — including the SDK and app,
+/// which treat [`WillError::WillNotFound`] as "no such will" — cannot tell a
+/// genuinely nonexistent will apart from one that exists on-chain but needs to
+/// be restored, and a will that was explicitly archived cannot be located via
+/// this function at all.
+///
+/// A dedicated `WillArchived` error code is deferred to a follow-up: it is
+/// not implementable with the current SDK version, so this documentation is
+/// the contract's contract with its consumers until the storage API grows an
+/// archived-entry probe.
 pub fn load_will(env: &Env, will_id: u64) -> Result<Will, WillError> {
     let key = DataKey::Will(will_id);
     env.storage()
