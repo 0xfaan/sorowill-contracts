@@ -135,6 +135,33 @@ use will::{MAX_BENEFICIARIES, MAX_GUARDIANS, GUARDIAN_THRESHOLD};
 
 `checkin_period_days` and `grace_period_days` passed to `create_will` must each be at least `1` day (and at most `MAX_PERIOD_DAYS`); a value of `0` panics with `WillError::InvalidPeriod`.
 
+### Reading wills and Soroban's archival model (issue #166)
+
+`get_will` and `get_wills_by_owner` / `get_wills_by_beneficiary` read a will's
+persistent entry via `storage::load_will`, which returns
+`WillError::WillNotFound` whenever the key is absent.
+
+Soroban's persistent-storage API does **not** expose *why* a key is absent, so
+`WillNotFound` intentionally conflates three situations that are
+indistinguishable on-chain with soroban-sdk 22:
+
+1. **Never created** — the will id was never allocated.
+2. **Explicitly archived** — the will reached a terminal state and was moved
+   to the `ArchivedWill` namespace by `archive_will`.
+3. **TTL-archived by the network** — a terminal will's entry stopped renewing
+   its TTL (see `storage::save_will`) and was archived by Soroban once its TTL
+   hit zero. On the live network, an invocation that touches an archived entry
+   fails at the host level before contract code runs; in the test host it
+   surfaces as a plain `None`.
+
+**Consumers should therefore treat `WillNotFound` as "no readable will at this
+id"** — it cannot distinguish a will that exists but needs to be restored (or
+was explicitly archived) from one that never existed. This is documented on
+`storage::load_will` and the `get_will` entry point; a dedicated
+`WillArchived` error code is deferred until the SDK exposes an archived-entry
+probe. See [issue #166](https://github.com/SoroWill/sorowill-contracts/issues/166)
+for the full context.
+
 ## Error codes
 
 Every failure mode is a `#[contracterror]` variant of `WillError`

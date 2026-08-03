@@ -186,6 +186,19 @@ impl WillContract {
         env.storage().instance().remove(&DataKey::Will);
     }
 
+    /// Reads the full state of the will stored in instance storage.
+    ///
+    /// # Archived-entry limitation (issue #166)
+    ///
+    /// This entrypoint unwraps the instance-storage read and panics when no
+    /// will is present. On the live network, a will whose persistent TTL
+    /// lapsed is archived by Soroban and cannot be read at all until it is
+    /// explicitly restored — a `None` here is indistinguishable from a will
+    /// that was never created. Terminal wills (`Released`/`Cancelled`) stop
+    /// renewing their TTL (see [`crate::storage::save_will`]) and will
+    /// eventually lapse into this state. See [`crate::storage::load_will`]
+    /// for the full discussion of the archival model and its implications for
+    /// SDK/app consumers.
     pub fn get_will(env: Env) -> Will {
         env.storage().instance().get(&DataKey::Will).unwrap()
     }
