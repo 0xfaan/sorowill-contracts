@@ -19,6 +19,9 @@ test_snapshots/
 .vscode/
 *.iml
 
+# Local AI tool config/state, never pushed
+.claude/
+
 # Environment / secrets
 .env
 .env.*
