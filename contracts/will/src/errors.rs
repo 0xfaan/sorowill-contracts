@@ -21,8 +21,10 @@ pub enum WillError {
     GracePeriodNotExpired = 5,
     /// `emergency_checkin` was called after the grace period already elapsed.
     GracePeriodExpired = 6,
-    /// Beneficiary percentages did not sum to exactly 100.
+    /// Beneficiary percentages did not sum to exactly 10,000.
     InvalidPercentages = 7,
+    /// A beneficiary percentage is not in the valid range (1..=100).
+    InvalidPercentage = 22,
     /// The guardian has already voted to trigger this will.
     AlreadyVoted = 8,
     /// The caller is not a designated guardian of this will.
@@ -33,4 +35,37 @@ pub enum WillError {
     ZeroAmount = 11,
     /// Too many beneficiaries (or guardians) were supplied.
     TooManyBeneficiaries = 12,
+    /// The requested action requires the will to be `Released` or `Cancelled`.
+    WillNotSettled = 13,
+    /// The requested action requires the will to be `Released`.
+    WillNotReleased = 23,
+    /// Cannot merge: both wills must be owned by the same address.
+    NotSameOwner = 24,
+    /// Cannot merge: one or both wills are not in Active status.
+    WillNotBothActive = 14,
+    /// Cannot merge: same will id provided for both wills.
+    SameWillId = 15,
+    /// Cannot merge: merging would result in too many beneficiaries or guardians.
+    MergeWouldExceedLimits = 16,
+    /// A check-in or grace period was zero, or long enough that the resulting
+    /// deadline could not be represented as a ledger timestamp.
+    InvalidPeriod = 25,
+    /// The same address was supplied more than once in a guardian list.
+    DuplicateGuardian = 26,
+    /// The guardian-list cooldown has not yet elapsed; guardian_trigger is
+    /// blocked until the cooldown period passes after the last guardian-list
+    /// change.
+    GuardianCooldownActive = 27,
+    /// The owner cannot designate themselves as a guardian of their own will.
+    OwnerCannotBeGuardian = 17,
+    /// A beneficiary is not found in the will's beneficiary list.
+    BeneficiaryNotFound = 18,
+    /// Keeper bounty basis points exceed the maximum allowed (100 bps/1%).
+    KeeperBountyExceedsMax = 19,
+    /// Guardian threshold is out of range (must be 1..=guardians.len()).
+    InvalidGuardianThreshold = 20,
+    /// The sum of every `Allocation::FixedAmount` beneficiary on a will
+    /// exceeds the will's balance, or (for a will with no percentage-based
+    /// beneficiaries at all) does not exactly account for the whole balance.
+    FixedAmountExceedsBalance = 21,
 }
