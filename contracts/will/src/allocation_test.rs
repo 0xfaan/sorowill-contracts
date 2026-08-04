@@ -37,7 +37,7 @@ fn setup<'a>() -> (Env, WillContractClient<'a>, Address, TokenClient<'a>, Addres
     let contract_id = env.register(WillContract, ());
     let client = WillContractClient::new(&env, &contract_id);
 
-    (env, client, owner, TokenClient::new(&env, &token_address), token_address)
+    (env.clone(), client, owner, TokenClient::new(&env, &token_address), token_address)
 }
 
 fn advance(env: &Env, days: u64) {
@@ -46,9 +46,9 @@ fn advance(env: &Env, days: u64) {
 
 fn release(env: &Env, client: &WillContractClient, will_id: u64) {
     advance(env, 91);
-    client.trigger_will(will_id);
+    client.trigger_will(&will_id);
     advance(env, 8);
-    client.release_inheritance(will_id, &None);
+    client.release_inheritance(&will_id, &None);
 }
 
 /// Regression: a pure-percentage will (the original, pre-`Allocation` shape)
@@ -67,7 +67,7 @@ fn pure_percentage_regression() {
     ];
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
 
-    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None);
+    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
     release(&env, &client, will_id);
 
     assert_eq!(token.balance(&a), 600_000);
@@ -92,7 +92,7 @@ fn pure_fixed_amount() {
     ];
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
 
-    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None);
+    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
     release(&env, &client, will_id);
 
     assert_eq!(token.balance(&sister), 700_000);
@@ -118,7 +118,7 @@ fn mixed_fixed_and_percentage() {
     ];
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
 
-    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None);
+    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
     release(&env, &client, will_id);
 
     // Sister gets her exact fixed amount; the remaining 800,000 splits 50/50.
@@ -143,7 +143,7 @@ fn fixed_amount_exceeding_balance_is_rejected() {
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
 
     assert_eq!(
-        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None),
+        client.try_create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0),
         Err(Ok(WillError::FixedAmountExceedsBalance.into()))
     );
 }
@@ -166,7 +166,7 @@ fn top_up_grows_the_percentage_remainder_not_the_fixed_share() {
     ];
     let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 1_000_000_i128)];
 
-    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None);
+    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
     client.top_up(&will_id, &owner, &token_address, &500_000);
 
     release(&env, &client, will_id);
@@ -206,6 +206,7 @@ fn will_partialeq_allows_single_assert() {
         &vec![&env],
         &2,
         &None,
+        &0,
     );
 
     // Fetch the will twice — the two snapshots must be identical.

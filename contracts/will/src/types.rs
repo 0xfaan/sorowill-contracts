@@ -1,5 +1,4 @@
-use soroban_sdk::{contracttype, Address, Symbol, Vec};
-use soroban_sdk::{contracttype, Address, Map, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, Map, Symbol, Vec};
 
 /// How a beneficiary's share of a will is calculated.
 ///
@@ -223,6 +222,9 @@ pub struct Will {
     /// When set, a portion of the inheritance is paid to callers who trigger
     /// or release the will (not to the owner). Defaults to 0.
     pub keeper_bounty_bps: u32,
+    /// Optional delegate address that may call `check_in` on the owner's
+    /// behalf. `None` means only the owner can check in.
+    pub delegate: Option<Address>,
 }
 
 /// Reasons a guardian can provide when casting a trigger vote.

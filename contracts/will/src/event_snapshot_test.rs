@@ -17,16 +17,17 @@
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
-    vec, Address, Env, IntoVal, TryIntoVal,
+    vec, Address, Env, TryIntoVal,
 };
 
 use crate::{
-    events, types::{Allocation, Beneficiary, Guardian, WillStatus}, 
+    events,
+    types::{Allocation, Beneficiary},
     WillContract, WillContractClient,
 };
 
 /// Test setup helper that creates a basic contract environment
-fn setup_test_env() -> (Env, Address, Address, WillContractClient) {
+fn setup_test_env<'a>() -> (Env, Address, Address, WillContractClient<'a>) {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_timestamp(1_700_000_000);
@@ -43,14 +44,14 @@ fn find_event_by_topic(
     env: &Env,
     topic_symbol: soroban_sdk::Symbol,
     will_id: Option<u64>,
-) -> Option<soroban_sdk::RawVal> {
+) -> Option<soroban_sdk::Val> {
     let events = env.events().all();
     for event in events.iter() {
         if event.1.is_empty() {
             continue;
         }
         let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(env);
-        if topic0 != Ok(topic_symbol) {
+        if topic0 != Ok(topic_symbol.clone()) {
             continue;
         }
         
@@ -72,7 +73,7 @@ fn find_event_by_topic(
 #[test]
 fn test_will_created_event_snapshot() {
     let (env, owner, _contract_id, client) = setup_test_env();
-    
+
     let beneficiary_a = Address::generate(&env);
     let beneficiary_b = Address::generate(&env);
     let beneficiaries = vec![
@@ -82,14 +83,17 @@ fn test_will_created_event_snapshot() {
             allocation: Allocation::Percentage(7_000),
         },
         Beneficiary {
-            address: beneficiary_b.clone(), 
+            address: beneficiary_b.clone(),
             allocation: Allocation::Percentage(3_000),
         },
     ];
-    
+
     let guardians = vec![&env];
-    let tokens = vec![&env, (Address::generate(&env), 1_000_000_i128)];
-    
+    let token_address = env.register_stellar_asset_contract_v2(owner.clone()).address();
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_address)
+        .mint(&owner, &1_000_000_i128);
+    let tokens = vec![&env, (token_address, 1_000_000_i128)];
+
     // Execute create_will to trigger will_created event
     let will_id = client.create_will(
         &owner,
@@ -100,6 +104,7 @@ fn test_will_created_event_snapshot() {
         &guardians,
         &2,  // guardian_threshold
         &None, // keeper_bounty_bps
+        &0, // confirmation_delay_seconds
     );
 
     // Verify will_created event
@@ -120,14 +125,16 @@ fn test_will_created_event_snapshot() {
 
 #[test]  
 fn test_will_confirmed_event_snapshot() {
-    let (env, owner, _contract_id, client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     // This event would be triggered by will confirmation (issue #43)
     // Since the actual implementation may not exist yet, we test the event function directly
     let will_id = 12345u64;
     
     // Test the event function directly
-    events::will_confirmed(&env, will_id, &owner);
+    env.as_contract(&contract_id, || {
+        events::will_confirmed(&env, will_id, &owner);
+    });
     
     // Verify will_confirmed event
     let event_data = find_event_by_topic(&env, symbol_short!("confirmed"), Some(will_id))
@@ -139,13 +146,15 @@ fn test_will_confirmed_event_snapshot() {
 
 #[test]
 fn test_check_in_event_snapshot() {
-    let (env, owner, _contract_id, client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     // Test check_in event function directly since contract may not compile
     let will_id = 12345u64;
     let next_deadline = env.ledger().timestamp() + (90 * 24 * 60 * 60); // 90 days
     
-    events::check_in(&env, will_id, &owner, next_deadline);
+    env.as_contract(&contract_id, || {
+        events::check_in(&env, will_id, &owner, next_deadline);
+    });
     
     // Verify check_in event
     let event_data = find_event_by_topic(&env, symbol_short!("checkin"), Some(will_id))
@@ -158,12 +167,14 @@ fn test_check_in_event_snapshot() {
 
 #[test] 
 fn test_will_triggered_event_snapshot() {
-    let (env, _owner, _contract_id, _client) = setup_test_env();
+    let (env, _owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let grace_period_ends = env.ledger().timestamp() + (7 * 24 * 60 * 60); // 7 days
     
-    events::will_triggered(&env, will_id, grace_period_ends);
+    env.as_contract(&contract_id, || {
+        events::will_triggered(&env, will_id, grace_period_ends);
+    });
     
     // Verify will_triggered event
     let event_data = find_event_by_topic(&env, symbol_short!("triggered"), Some(will_id))
@@ -175,12 +186,14 @@ fn test_will_triggered_event_snapshot() {
 
 #[test]
 fn test_emergency_checkin_event_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let next_deadline = env.ledger().timestamp() + (90 * 24 * 60 * 60);
     
-    events::emergency_checkin(&env, will_id, &owner, next_deadline);
+    env.as_contract(&contract_id, || {
+        events::emergency_checkin(&env, will_id, &owner, next_deadline);
+    });
     
     // Verify emergency_checkin event
     let event_data = find_event_by_topic(&env, symbol_short!("emerg"), Some(will_id))
@@ -193,13 +206,15 @@ fn test_emergency_checkin_event_snapshot() {
 
 #[test]
 fn test_inheritance_released_event_snapshot() {
-    let (env, _owner, _contract_id, _client) = setup_test_env();
+    let (env, _owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let token_count = 2u32;
     let beneficiaries_count = 3u32;
     
-    events::inheritance_released(&env, will_id, token_count, beneficiaries_count);
+    env.as_contract(&contract_id, || {
+        events::inheritance_released(&env, will_id, token_count, beneficiaries_count);
+    });
     
     // Verify inheritance_released event
     let event_data = find_event_by_topic(&env, symbol_short!("released"), Some(will_id))
@@ -212,12 +227,14 @@ fn test_inheritance_released_event_snapshot() {
 
 #[test]
 fn test_will_cancelled_event_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let token_count = 2u32;
     
-    events::will_cancelled(&env, will_id, &owner, token_count);
+    env.as_contract(&contract_id, || {
+        events::will_cancelled(&env, will_id, &owner, token_count);
+    });
     
     // Verify will_cancelled event
     let event_data = find_event_by_topic(&env, symbol_short!("cancelled"), Some(will_id))
@@ -230,7 +247,7 @@ fn test_will_cancelled_event_snapshot() {
 
 #[test]
 fn test_beneficiaries_updated_event_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let beneficiaries = vec![
@@ -240,9 +257,11 @@ fn test_beneficiaries_updated_event_snapshot() {
             allocation: Allocation::Percentage(10_000),
         },
     ];
-    let beneficiary_count = beneficiaries.len() as u32;
+    let beneficiary_count = beneficiaries.len();
     
-    events::beneficiaries_updated(&env, will_id, &owner, beneficiary_count, &beneficiaries);
+    env.as_contract(&contract_id, || {
+        events::beneficiaries_updated(&env, will_id, &owner, beneficiary_count, &beneficiaries);
+    });
     
     // Verify beneficiaries_updated event
     let event_data = find_event_by_topic(&env, symbol_short!("benefup"), Some(will_id))
@@ -257,11 +276,13 @@ fn test_beneficiaries_updated_event_snapshot() {
 
 #[test]
 fn test_guardians_updated_event_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     
-    events::guardians_updated(&env, will_id, &owner);
+    env.as_contract(&contract_id, || {
+        events::guardians_updated(&env, will_id, &owner);
+    });
     
     // Verify guardians_updated event
     let event_data = find_event_by_topic(&env, symbol_short!("guardup"), Some(will_id))
@@ -273,11 +294,13 @@ fn test_guardians_updated_event_snapshot() {
 
 #[test]
 fn test_will_closed_event_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     
-    events::will_closed(&env, will_id, &owner);
+    env.as_contract(&contract_id, || {
+        events::will_closed(&env, will_id, &owner);
+    });
     
     // Verify will_closed event
     let event_data = find_event_by_topic(&env, symbol_short!("closed"), Some(will_id))
@@ -289,14 +312,16 @@ fn test_will_closed_event_snapshot() {
 
 #[test]
 fn test_top_up_event_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let token = Address::generate(&env);
     let amount = 1_000_000_i128;
     let new_balance = 5_000_000_i128;
     
-    events::top_up(&env, will_id, &owner, &token, amount, new_balance);
+    env.as_contract(&contract_id, || {
+        events::top_up(&env, will_id, &owner, &token, amount, new_balance);
+    });
     
     // Verify top_up event
     let event_data = find_event_by_topic(&env, symbol_short!("topup"), Some(will_id))
@@ -311,14 +336,16 @@ fn test_top_up_event_snapshot() {
 
 #[test]
 fn test_guardian_voted_event_snapshot() {
-    let (env, _owner, _contract_id, _client) = setup_test_env();
+    let (env, _owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let guardian = Address::generate(&env);
     let weight = 1u32;
     let total_weight = 2u32;
     
-    events::guardian_voted(&env, will_id, &guardian, weight, total_weight);
+    env.as_contract(&contract_id, || {
+        events::guardian_voted(&env, will_id, &guardian, weight, total_weight);
+    });
     
     // Verify guardian_voted event
     let event_data = find_event_by_topic(&env, symbol_short!("gvote"), Some(will_id))
@@ -332,14 +359,16 @@ fn test_guardian_voted_event_snapshot() {
 
 #[test]
 fn test_guardian_cancel_voted_event_snapshot() {
-    let (env, _owner, _contract_id, _client) = setup_test_env();
+    let (env, _owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let guardian = Address::generate(&env);
     let weight = 1u32;
     let total_weight = 2u32;
     
-    events::guardian_cancel_voted(&env, will_id, &guardian, weight, total_weight);
+    env.as_contract(&contract_id, || {
+        events::guardian_cancel_voted(&env, will_id, &guardian, weight, total_weight);
+    });
     
     // Verify guardian_cancel_voted event
     let event_data = find_event_by_topic(&env, symbol_short!("gcvote"), Some(will_id))
@@ -353,13 +382,15 @@ fn test_guardian_cancel_voted_event_snapshot() {
 
 #[test]
 fn test_guardian_cancelled_trigger_event_snapshot() {
-    let (env, _owner, _contract_id, _client) = setup_test_env();
+    let (env, _owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
     let guardian = Address::generate(&env);
     let next_deadline = env.ledger().timestamp() + (90 * 24 * 60 * 60);
     
-    events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
+    env.as_contract(&contract_id, || {
+        events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
+    });
     
     // Verify guardian_cancelled_trigger event
     let event_data = find_event_by_topic(&env, symbol_short!("gcancel"), Some(will_id))
@@ -372,7 +403,7 @@ fn test_guardian_cancelled_trigger_event_snapshot() {
 
 #[test] 
 fn test_remaining_events_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     // Test the remaining events that don't require complex setup
     
@@ -381,7 +412,9 @@ fn test_remaining_events_snapshot() {
     let consumed_will_id = 67890u64;
     let new_balance = 10_000_000_i128;
     
-    events::wills_merged(&env, surviving_will_id, consumed_will_id, &owner, new_balance);
+    env.as_contract(&contract_id, || {
+        events::wills_merged(&env, surviving_will_id, consumed_will_id, &owner, new_balance);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("merged"), Some(surviving_will_id))
         .expect("wills_merged event not found");
@@ -395,7 +428,9 @@ fn test_remaining_events_snapshot() {
     let from_version = 0u32;
     let to_version = 1u32;
     
-    events::will_migrated(&env, will_id, &owner, from_version, to_version);
+    env.as_contract(&contract_id, || {
+        events::will_migrated(&env, will_id, &owner, from_version, to_version);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("migrated"), Some(will_id))
         .expect("will_migrated event not found");
@@ -408,7 +443,9 @@ fn test_remaining_events_snapshot() {
     let source_id = 22222u64;
     let new_id = 33333u64;
     
-    events::will_cloned(&env, source_id, new_id, &owner);
+    env.as_contract(&contract_id, || {
+        events::will_cloned(&env, source_id, new_id, &owner);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("cloned"), Some(new_id))
         .expect("will_cloned event not found");
@@ -419,18 +456,22 @@ fn test_remaining_events_snapshot() {
 
 #[test]
 fn test_batch_and_advanced_events_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     // batch_created event  
     let will_ids = vec![&env, 1u64, 2u64, 3u64];
-    events::batch_created(&env, &owner, &will_ids);
+    env.as_contract(&contract_id, || {
+        events::batch_created(&env, &owner, &will_ids);
+    });
     
     // Find batch event (topic is owner, not a standard will_id pattern)
     let events = env.events().all();
     let mut found_batch = false;
     for event in events.iter() {
-        if event.1.len() > 0 {
-            if let Ok(symbol_short!("batch")) = event.1.get(0).unwrap().try_into_val(&env) {
+        if !event.1.is_empty() {
+            let topic0: Result<soroban_sdk::Symbol, _> =
+                event.1.get(0).unwrap().try_into_val(&env);
+            if topic0 == Ok(symbol_short!("batch")) {
                 let data: soroban_sdk::Vec<u64> = event.2.try_into_val(&env).unwrap();
                 assert_eq!(data, will_ids, "batch event will_ids mismatch");
                 found_batch = true;
@@ -442,7 +483,9 @@ fn test_batch_and_advanced_events_snapshot() {
     
     // will_archived event
     let will_id = 44444u64;
-    events::will_archived(&env, will_id, &owner);
+    env.as_contract(&contract_id, || {
+        events::will_archived(&env, will_id, &owner);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("archived"), Some(will_id))
         .expect("will_archived event not found");
@@ -454,7 +497,9 @@ fn test_batch_and_advanced_events_snapshot() {
     let new_grace_period_days = 14u64;
     let next_deadline = env.ledger().timestamp() + (new_checkin_period_days * 24 * 60 * 60);
     
-    events::periods_updated(&env, will_id, &owner, new_checkin_period_days, new_grace_period_days, next_deadline);
+    env.as_contract(&contract_id, || {
+        events::periods_updated(&env, will_id, &owner, new_checkin_period_days, new_grace_period_days, next_deadline);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("periodu"), Some(will_id))
         .expect("periods_updated event not found");
@@ -467,12 +512,14 @@ fn test_batch_and_advanced_events_snapshot() {
 
 #[test]
 fn test_final_events_snapshot() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     // beneficiary_renounced event
     let will_id = 55555u64;
     let beneficiary = Address::generate(&env);
-    events::beneficiary_renounced(&env, will_id, &beneficiary, &owner);
+    env.as_contract(&contract_id, || {
+        events::beneficiary_renounced(&env, will_id, &beneficiary, &owner);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("renounce"), Some(will_id))
         .expect("beneficiary_renounced event not found");
@@ -482,7 +529,9 @@ fn test_final_events_snapshot() {
     
     // will_settings_updated event
     let update_fields = vec![&env, symbol_short!("benefup"), symbol_short!("guardup")];
-    events::will_settings_updated(&env, will_id, &owner, &update_fields);
+    env.as_contract(&contract_id, || {
+        events::will_settings_updated(&env, will_id, &owner, &update_fields);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("setupd"), Some(will_id))
         .expect("will_settings_updated event not found");
@@ -493,7 +542,9 @@ fn test_final_events_snapshot() {
     // keeper_bounty_paid event
     let keeper = Address::generate(&env);
     let amount = 50_000_i128;
-    events::keeper_bounty_paid(&env, will_id, &keeper, amount);
+    env.as_contract(&contract_id, || {
+        events::keeper_bounty_paid(&env, will_id, &keeper, amount);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("bounty"), Some(will_id))
         .expect("keeper_bounty_paid event not found");
@@ -505,7 +556,9 @@ fn test_final_events_snapshot() {
     let original_id = 66666u64;
     let new_id = 77777u64;
     let split_amount = 2_500_000_i128;
-    events::will_split(&env, original_id, new_id, &owner, split_amount);
+    env.as_contract(&contract_id, || {
+        events::will_split(&env, original_id, new_id, &owner, split_amount);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("split"), Some(original_id))
         .expect("will_split event not found");
@@ -517,7 +570,9 @@ fn test_final_events_snapshot() {
     // hashed_claimed event
     let claimant = Address::generate(&env);
     let claim_amount = 1_000_000_i128;
-    events::hashed_claimed(&env, will_id, &claimant, claim_amount);
+    env.as_contract(&contract_id, || {
+        events::hashed_claimed(&env, will_id, &claimant, claim_amount);
+    });
     
     let event_data = find_event_by_topic(&env, symbol_short!("hclaim"), Some(will_id))
         .expect("hashed_claimed event not found");
@@ -530,45 +585,49 @@ fn test_final_events_snapshot() {
 /// in sequence during a typical will lifecycle.
 #[test]
 fn test_event_ordering_lifecycle() {
-    let (env, owner, _contract_id, _client) = setup_test_env();
+    let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 99999u64;
     let beneficiary = Address::generate(&env);
     
     // Simulate a sequence of events in order
     
-    // 1. Will created
+    // All six events must be published within the same `as_contract`
+    // invocation: `env.events().all()` in Soroban's test host only retains
+    // events from the current/last top-level invocation, so publishing each
+    // one under its own `as_contract` call would make every earlier event
+    // disappear before this test gets to inspect the sequence.
     let beneficiaries = vec![&env, Beneficiary {
         address: beneficiary.clone(),
         allocation: Allocation::Percentage(10_000),
     }];
-    events::will_created(&env, will_id, &owner, 1, &beneficiaries, env.ledger().timestamp() + 3600);
-    
-    // 2. Check-in
-    events::check_in(&env, will_id, &owner, env.ledger().timestamp() + 7200);
-    
-    // 3. Will triggered
-    events::will_triggered(&env, will_id, env.ledger().timestamp() + 604800);
-    
-    // 4. Emergency check-in (cancels trigger)
-    events::emergency_checkin(&env, will_id, &owner, env.ledger().timestamp() + 10800);
-    
-    // 5. Will triggered again
-    events::will_triggered(&env, will_id, env.ledger().timestamp() + 608400);
-    
-    // 6. Inheritance released
-    events::inheritance_released(&env, will_id, 1, 1);
+    env.as_contract(&contract_id, || {
+        // 1. Will created
+        events::will_created(&env, will_id, &owner, 1, &beneficiaries, env.ledger().timestamp() + 3600);
+        // 2. Check-in
+        events::check_in(&env, will_id, &owner, env.ledger().timestamp() + 7200);
+        // 3. Will triggered
+        events::will_triggered(&env, will_id, env.ledger().timestamp() + 604800);
+        // 4. Emergency check-in (cancels trigger)
+        events::emergency_checkin(&env, will_id, &owner, env.ledger().timestamp() + 10800);
+        // 5. Will triggered again
+        events::will_triggered(&env, will_id, env.ledger().timestamp() + 608400);
+        // 6. Inheritance released
+        events::inheritance_released(&env, will_id, 1, 1);
+    });
     
     // Verify all events are present and in correct order by checking the event stream
     let all_events = env.events().all();
     let mut event_symbols = Vec::new();
     
     for event in all_events.iter() {
-        if event.1.len() > 0 {
-            if let Ok(symbol) = event.1.get(0).unwrap().try_into_val::<soroban_sdk::Symbol>(&env) {
+        if !event.1.is_empty() {
+            let symbol: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
+            if let Ok(symbol) = symbol {
                 // Check if this event is for our will_id
                 if event.1.len() > 1 {
-                    if let Ok(id) = event.1.get(1).unwrap().try_into_val::<u64>(&env) {
+                    let id: Result<u64, _> = event.1.get(1).unwrap().try_into_val(&env);
+                    if let Ok(id) = id {
                         if id == will_id {
                             event_symbols.push(symbol);
                         }
@@ -577,9 +636,9 @@ fn test_event_ordering_lifecycle() {
             }
         }
     }
-    
+
     // Verify the expected sequence
-    let expected_sequence = vec![
+    let expected_sequence: std::vec::Vec<soroban_sdk::Symbol> = std::vec![
         symbol_short!("created"),
         symbol_short!("checkin"),
         symbol_short!("triggered"),

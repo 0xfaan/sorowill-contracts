@@ -54,6 +54,7 @@ fn release_pays_the_updated_beneficiary_list_not_the_original_one() {
         &vec![&env],
         &2,
         &None,
+        &0,
     );
 
     // The owner changes their mind well before ever missing a check-in.
@@ -128,6 +129,7 @@ fn release_pays_the_latest_of_several_beneficiary_updates() {
         &vec![&env],
         &2,
         &None,
+        &0,
     );
 
     client.update_beneficiaries(

@@ -45,6 +45,13 @@ impl MaliciousToken {
             .unwrap_or(0)
     }
 
+    /// `create_will` probes every token with a read-only `decimals()` call
+    /// before transferring, so this mock must answer it like a real SEP-41
+    /// token to be usable as a will's locked asset.
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+
     /// Configures this token to attempt `release_inheritance(will_id)` on
     /// `will_contract` every time `transfer` is invoked, simulating a
     /// malicious or reentrant token contract.
@@ -86,7 +93,7 @@ impl MaliciousToken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Beneficiary, WillContract, WillContractClient, WillStatus};
+    use crate::{Allocation, Beneficiary, WillContract, WillContractClient, WillStatus};
     use soroban_sdk::{
         testutils::{Address as _, Ledger},
         vec,
@@ -117,13 +124,15 @@ mod tests {
                 &env,
                 Beneficiary {
                     address: beneficiary.clone(),
-                    basis_points: 10_000,
+                    allocation: Allocation::Percentage(10_000),
                 },
             ],
             &90,
             &7,
             &vec![&env],
+            &2,
             &None,
+            &0,
         );
 
         env.ledger()

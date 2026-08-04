@@ -45,7 +45,7 @@ const FIXTURE_PATH: &str = concat!(
 /// `soroban-sdk` 22.x names this constant `__SPEC_XDR_FN_CREATE_WILL` on the
 /// contract struct. The slice length is determined at compile time and varies
 /// with the function signature.
-const SPEC_XDR: &[u8] = WillContract::spec_xdr_create_will();
+const SPEC_XDR: &[u8] = &WillContract::spec_xdr_create_will();
 
 /// Verifies that the live spec matches the checked-in fixture.
 ///
@@ -62,8 +62,7 @@ fn test_spec_fixture_create_will() {
     // Extract the hex line: the last non-comment, non-empty line.
     let fixture_hex = fixture_content
         .lines()
-        .filter(|l| !l.starts_with('#') && !l.is_empty())
-        .last()
+        .rfind(|l| !l.starts_with('#') && !l.is_empty())
         .unwrap_or("")
         .trim()
         .to_owned();

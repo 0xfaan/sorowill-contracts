@@ -61,6 +61,7 @@ fn will_created_event_includes_full_beneficiary_list() {
         &vec![&env],
         &2,
         &None,
+        &0,
     );
 
     let events = env.events().all();

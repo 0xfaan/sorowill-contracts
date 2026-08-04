@@ -46,7 +46,7 @@ use soroban_sdk::{
     vec, Address, Env, Vec,
 };
 
-use crate::{Beneficiary, GuardianVoteReason, WillContract, WillContractClient};
+use crate::{Allocation, Beneficiary, GuardianVoteReason, WillContract, WillContractClient};
 
 const DAY: u64 = 86_400;
 
@@ -184,6 +184,7 @@ impl Fixture<'_> {
             guardians,
             &2,
             &None,
+            &0,
         );
         (will_id, list)
     }
@@ -218,7 +219,7 @@ fn beneficiaries(env: &Env, count: u32) -> Vec<Beneficiary> {
         allocated += basis_points;
         list.push_back(Beneficiary {
             address: Address::generate(env),
-            basis_points,
+            allocation: Allocation::Percentage(basis_points),
         });
     }
     list
@@ -244,7 +245,7 @@ fn reshare(env: &Env, beneficiaries: &Vec<Beneficiary>) -> Vec<Beneficiary> {
         allocated += basis_points;
         list.push_back(Beneficiary {
             address: beneficiary.address.clone(),
-            basis_points,
+            allocation: Allocation::Percentage(basis_points),
         });
     }
     list
@@ -297,7 +298,7 @@ fn profile_lifecycle(report: &mut Report) {
     f.advance(91 * DAY);
     f.client.trigger_will(&will_id);
     f.advance(8 * DAY);
-    f.client.release_inheritance(&will_id);
+    f.client.release_inheritance(&will_id, &None);
     report.record(&f.env, "release_inheritance");
 
     // `cancel_will` needs a will that was never released, so use a second one.
@@ -341,6 +342,10 @@ fn profile_guardians(report: &mut Report) {
     let first = guardians.get_unchecked(0);
     let second = guardians.get_unchecked(1);
 
+    // guardian_trigger is blocked until GUARDIAN_COOLDOWN_DAYS have passed
+    // since the guardian list was last changed (it was just set at creation).
+    f.advance(7 * DAY);
+
     f.client.guardian_trigger(&will_id, &first, &GuardianVoteReason::Incapacitated);
     report.record(&f.env, "guardian_trigger (below threshold)");
 
@@ -352,6 +357,7 @@ fn profile_guardians(report: &mut Report) {
     let g = fixture();
     let g_guardians = two_guardians(&g.env);
     let (g_will_id, _) = g.create(&g_guardians);
+    g.advance(7 * DAY);
     g.client
         .guardian_trigger(&g_will_id, &g_guardians.get_unchecked(0), &GuardianVoteReason::Incapacitated);
     g.client
@@ -368,7 +374,7 @@ fn profile_queries(report: &mut Report) {
     report.record(&f.env, "get_wills_by_owner (1 will)");
 
     f.client
-        .get_wills_by_beneficiary(&list.get_unchecked(0).address, &None, &100);
+        .get_wills_by_beneficiary(&list.get_unchecked(0).address);
     report.record(&f.env, "get_wills_by_beneficiary (1 will)");
 }
 
@@ -473,11 +479,16 @@ fn assert_footprints(report: &Report) {
         "a shares-only update must write fewer entries than a full replacement"
     );
 
+    // Unlike a plain check_in, emergency_checkin always does two additional
+    // things regardless of whether any guardian votes were cast: it removes
+    // the will from the triggered-wills index (it's returning to Active) and
+    // appends an audit-trail transition. So its baseline is `will_only + 2`,
+    // not `will_only`.
     assert_eq!(
         report
             .row("emergency_checkin (no votes cast)")
             .write_entries,
-        will_only,
+        will_only + 2,
         "an emergency check-in with no votes cast must not touch vote markers"
     );
     assert_eq!(

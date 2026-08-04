@@ -6,7 +6,7 @@
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
-use crate::types::{Beneficiary, GuardianVoteReason};
+use crate::types::Beneficiary;
 
 /// Published when a new will is created.
 ///
@@ -283,5 +283,29 @@ pub fn hashed_claimed(env: &Env, will_id: u64, claimant: &Address, amount: i128)
     env.events().publish(
         (symbol_short!("hclaim"), will_id),
         (claimant.clone(), amount),
+    );
+}
+
+/// Published when the owner sets or replaces the delegate address that may
+/// call `check_in` on their behalf.
+pub fn delegate_set(env: &Env, will_id: u64, owner: &Address, delegate: &Address) {
+    env.events().publish(
+        (symbol_short!("delegset"), will_id),
+        (owner.clone(), delegate.clone()),
+    );
+}
+
+/// Published when the owner clears the will's delegate address.
+pub fn delegate_cleared(env: &Env, will_id: u64, owner: &Address) {
+    env.events()
+        .publish((symbol_short!("delegclr"), will_id), owner.clone());
+}
+
+/// Published when a batch check-in resets the deadline for multiple wills in
+/// a single transaction.
+pub fn batch_checkin(env: &Env, owner: &Address, will_ids: &Vec<u64>, count: u32) {
+    env.events().publish(
+        (symbol_short!("batchchk"), owner.clone()),
+        (will_ids.clone(), count),
     );
 }

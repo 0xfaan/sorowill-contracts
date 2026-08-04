@@ -37,12 +37,12 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{Client as TokenClient, StellarAssetClient},
-    Address, Env, Map, Vec as SorobanVec,
+    Address, Env, Vec as SorobanVec,
 };
 
 use crate::{
     Allocation, Beneficiary, Will, WillContract, WillContractClient, WillStatus,
-    MAX_BENEFICIARIES, MAX_GUARDIANS, MAX_PERIOD_DAYS, MAX_TOKENS, SECONDS_PER_DAY,
+    MAX_BENEFICIARIES, MAX_GUARDIANS, MAX_PERIOD_DAYS, SECONDS_PER_DAY,
 };
 
 /// Number of distinct addresses the fuzzer picks from.
@@ -67,7 +67,7 @@ const MAX_FUZZ_GUARDIANS: usize = MAX_GUARDIANS as usize + 3;
 
 /// How many successive update attempts a single `update_beneficiaries`
 /// scenario replays against one will.
-const MAX_FUZZ_UPDATES: usize = 4;
+pub const MAX_FUZZ_UPDATES: usize = 4;
 
 /// One beneficiary entry, addressed by pool slot rather than by `Address`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,14 +140,16 @@ fn check(condition: bool, input: &impl core::fmt::Debug, message: &str) {
 
 /// Builds the fixed pool of addresses a scenario draws from.
 fn address_pool(env: &Env) -> SorobanVec<Address> {
-    (0..ADDRESS_POOL_SIZE)
-        .map(|_| Address::generate(env))
-        .collect()
+    let mut pool = SorobanVec::new(env);
+    for _ in 0..ADDRESS_POOL_SIZE {
+        pool.push_back(Address::generate(env));
+    }
+    pool
 }
 
 /// Resolves a fuzzer-chosen slot to a pool address.
 fn slot(pool: &SorobanVec<Address>, index: u8) -> Address {
-    pool.get(index as usize % pool.len() as usize).unwrap()
+    pool.get(index as u32 % pool.len()).unwrap()
 }
 
 /// Materialises beneficiary specs into the Soroban vector the contract takes.
@@ -182,11 +184,25 @@ fn to_guardians(env: &Env, pool: &SorobanVec<Address>, slots: &[u8]) -> SorobanV
 /// Address slots are left untouched, so duplicate beneficiaries survive
 /// sanitisation and keep getting exercised.
 pub fn sanitize_specs(specs: &[BeneficiarySpec]) -> Vec<BeneficiarySpec> {
-    let mut out: Vec<BeneficiarySpec> = specs
-        .iter()
-        .take(MAX_BENEFICIARIES as usize)
-        .cloned()
-        .collect();
+    // Entries whose `address_slot` resolves to the same pool address (mod
+    // ADDRESS_POOL_SIZE) would make `create_will`/`update_beneficiaries`
+    // reject the list as a duplicate beneficiary, so this only keeps the
+    // first entry per distinct resolved address — capping the result at
+    // `ADDRESS_POOL_SIZE` regardless of `MAX_BENEFICIARIES`, since the pool
+    // cannot supply more unique addresses than it has slots.
+    let mut seen_slots: Vec<u8> = Vec::new();
+    let mut out: Vec<BeneficiarySpec> = Vec::new();
+    for spec in specs.iter() {
+        let resolved = spec.address_slot % ADDRESS_POOL_SIZE;
+        if seen_slots.contains(&resolved) {
+            continue;
+        }
+        seen_slots.push(resolved);
+        out.push(spec.clone());
+        if out.len() >= MAX_BENEFICIARIES as usize {
+            break;
+        }
+    }
     if out.is_empty() {
         out.push(BeneficiarySpec {
             address_slot: 0,
@@ -208,10 +224,16 @@ pub fn sanitize_specs(specs: &[BeneficiarySpec]) -> Vec<BeneficiarySpec> {
 /// guaranteed to accept, so scenarios that fuzz a *later* entry point always
 /// have a will to work with.
 fn sanitize_create(input: &CreateWillInput) -> CreateWillInput {
+    // Pool slot 0 is always the scenario's owner (see `Scenario::new`), and
+    // the owner can never be their own guardian, so it is excluded here in
+    // addition to deduplicating repeated slots.
     let mut guardian_slots: Vec<u8> = Vec::new();
     for &index in input.guardian_slots.iter() {
         let resolved = index % ADDRESS_POOL_SIZE;
-        if guardian_slots.len() < MAX_GUARDIANS as usize && !guardian_slots.contains(&resolved) {
+        if resolved != 0
+            && guardian_slots.len() < MAX_GUARDIANS as usize
+            && !guardian_slots.contains(&resolved)
+        {
             guardian_slots.push(resolved);
         }
     }
@@ -307,6 +329,7 @@ pub fn run_create_will(input: &CreateWillInput) -> Outcome {
         &guardians,
         &input.guardian_threshold,
         &keeper_bounty,
+        &0,
     );
 
     let will_id = match result {
@@ -440,7 +463,7 @@ fn assert_created_will(
         check(
             scenario
                 .client
-                .get_wills_by_beneficiary(&beneficiary.address, &None, &100)
+                .get_wills_by_beneficiary(&beneficiary.address)
                 .iter()
                 .any(|indexed| indexed.id == will_id),
             input,
@@ -463,7 +486,7 @@ fn assert_full_release(scenario: &Scenario<'_>, input: &CreateWillInput, will_id
     }
 
     scenario.advance_days(will.grace_period_days.saturating_add(1));
-    match scenario.client.try_release_inheritance(&will_id) {
+    match scenario.client.try_release_inheritance(&will_id, &None) {
         Ok(Ok(())) => {}
         Ok(Err(_)) => violation(input, "release_inheritance returned an undecodable value"),
         Err(Ok(_)) => violation(input, "release_inheritance was rejected after the grace period expired"),
@@ -472,7 +495,7 @@ fn assert_full_release(scenario: &Scenario<'_>, input: &CreateWillInput, will_id
 
     let released = scenario.client.get_will(&will_id);
     check(released.status == WillStatus::Released, input, "the will is not Released after release_inheritance");
-    check(released.balances.len() == 0, input, "the released will still records balances");
+    check(released.balances.is_empty(), input, "the released will still records balances");
     check(
         scenario.token.balance(&scenario.client.address) == 0,
         input,
@@ -538,7 +561,7 @@ pub fn run_update_beneficiaries(input: &UpdateBeneficiariesInput) -> Vec<Outcome
             check(
                 scenario
                     .client
-                    .get_wills_by_beneficiary(&beneficiary.address, &None, &100)
+                    .get_wills_by_beneficiary(&beneficiary.address)
                     .iter()
                     .any(|indexed| indexed.id == neighbour_id),
                 input,
@@ -604,6 +627,7 @@ fn create_valid_will(
         &guardians,
         &create.guardian_threshold,
         &keeper_bounty,
+        &0,
     ) {
         Ok(Ok(will_id)) => will_id,
         Ok(Err(_)) => violation(input, "create_will returned a value that is not a u64 will id"),
@@ -651,7 +675,7 @@ fn assert_updated_beneficiaries(
         check(
             scenario
                 .client
-                .get_wills_by_beneficiary(&beneficiary.address, &None, &100)
+                .get_wills_by_beneficiary(&beneficiary.address)
                 .iter()
                 .any(|indexed| indexed.id == will_id),
             input,
@@ -672,7 +696,7 @@ fn assert_updated_beneficiaries(
         check(
             !scenario
                 .client
-                .get_wills_by_beneficiary(&old.address, &None, &100)
+                .get_wills_by_beneficiary(&old.address)
                 .iter()
                 .any(|indexed| indexed.id == will_id),
             input,

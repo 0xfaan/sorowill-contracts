@@ -68,4 +68,29 @@ pub enum WillError {
     /// exceeds the will's balance, or (for a will with no percentage-based
     /// beneficiaries at all) does not exactly account for the whole balance.
     FixedAmountExceedsBalance = 21,
+    /// A supplied token address does not respond to a read-only `decimals()`
+    /// probe, indicating it is not a valid SEP-41 token.
+    InvalidToken = 28,
+    /// The same beneficiary address was supplied more than once.
+    DuplicateBeneficiary = 29,
+    /// `confirm_will` was called on a will that is not `PendingConfirmation`.
+    WillNotConfirmed = 30,
+    /// `confirm_will` was called after the confirmation deadline elapsed.
+    ConfirmationWindowExpired = 31,
+    /// `get_wills` was called with more ids than `MAX_GET_WILLS_IDS`.
+    TooManyIds = 32,
+    /// `split_will` was asked to split more than the will's current balance.
+    InsufficientBalance = 33,
+    /// `split_will` was called with an empty beneficiary-to-split list, or a
+    /// split that would leave the source or new will with an invalid state.
+    InvalidSplit = 34,
+    /// `reveal_and_claim` was called with a pre-image that does not match any
+    /// stored `HashedBeneficiary` commitment on the will.
+    InvalidPreimage = 35,
+    /// `reveal_and_claim` was called for a hashed beneficiary slot that has
+    /// already been claimed.
+    AlreadyClaimed = 36,
+    /// An owner or beneficiary index list is already at
+    /// `MAX_WILLS_PER_INDEX` and cannot accept another will id.
+    TooManyWills = 37,
 }

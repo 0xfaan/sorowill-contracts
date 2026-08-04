@@ -7,10 +7,12 @@
 //! `(will_id, guardian)` pair with a timestamp so they can expire over time,
 //! and cleared independently when a guardian-release cycle resets.
 
-use soroban_sdk::{contracttype, Address, Bytes, Env, Vec};
+use soroban_sdk::{contracttype, panic_with_error, Address, Env, Vec};
 
 use crate::errors::WillError;
-use crate::types::{Guardian, GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition};
+use crate::types::{
+    GuardianVoteReason, ProtocolStats, TokenLockedBalance, Will, WillStatus, WillStatusTransition,
+};
 
 /// Number of ledgers in one calendar day, assuming a **5-second average ledger
 /// close time** on the Stellar network.
@@ -84,8 +86,6 @@ pub(crate) enum DataKey {
     WillHistory(u64),
     /// Archived state of a will that has been Released or Cancelled.
     ArchivedWill(u64),
-    /// Current contract schema version for migrations.
-    SchemaVersion,
     /// Global index of all wills currently in `Triggered` status,
     /// used for efficient keeper/discovery queries.
     TriggeredWills,
@@ -614,18 +614,3 @@ pub fn archive_will(env: &Env, will: &Will) {
     }
 }
 
-/// Current contract schema version. Increment this whenever the Will struct
-/// or storage format changes, then implement migration logic in lib.rs.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
-
-/// Gets the current contract schema version stored in state.
-pub fn get_contract_schema_version(env: &Env) -> u32 {
-    let key = DataKey::SchemaVersion;
-    env.storage().instance().get(&key).unwrap_or(0)
-}
-
-/// Updates the contract schema version. Called once per new deployment.
-pub fn set_contract_schema_version(env: &Env, version: u32) {
-    let key = DataKey::SchemaVersion;
-    env.storage().instance().set(&key, &version);
-}

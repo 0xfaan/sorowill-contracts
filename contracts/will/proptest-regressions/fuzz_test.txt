@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0c2f3289952e76ee3fe9bc354d6d6f1bdc4253e01d2bd8388497e113b9e490f2 # shrinks to input = UpdateBeneficiariesInput { create: CreateWillInput { mint: 1, amount: 1, beneficiaries: [BeneficiarySpec { address_slot: 66, basis_points: 0 }, BeneficiarySpec { address_slot: 6, basis_points: 0 }], guardian_slots: [], checkin_period_days: 0, grace_period_days: 0, guardian_threshold: 1, release_after_create: false }, updates: [], probe_non_owner: false }
+cc 0ab4a9b237ec2f72fd78f7976ff3bc0830cae93606f0778dcd39fca8ecec626b # shrinks to create = CreateWillInput { mint: 1, amount: 1, beneficiaries: [], guardian_slots: [], checkin_period_days: 0, grace_period_days: 0, guardian_threshold: 1, release_after_create: false }, raw_updates = [[BeneficiarySpec { address_slot: 216, basis_points: 0 }, BeneficiarySpec { address_slot: 42, basis_points: 0 }]], probe_non_owner = false
+cc ada1e08b16c06f555a6048aaf0a07905756460e65814cb16c0807381620ea98a # shrinks to input = UpdateBeneficiariesInput { create: CreateWillInput { mint: 1, amount: 1, beneficiaries: [], guardian_slots: [30], checkin_period_days: 0, grace_period_days: 0, guardian_threshold: 1, release_after_create: false }, updates: [], probe_non_owner: false }
+cc b0a684cb4dee78fb8796e1183e5ea431a2b6dfdbd88dd1d93d6e895ee32952b7 # shrinks to create = CreateWillInput { mint: 1, amount: 1, beneficiaries: [], guardian_slots: [48], checkin_period_days: 0, grace_period_days: 0, guardian_threshold: 1, release_after_create: false }, raw_updates = [[]], probe_non_owner = false
