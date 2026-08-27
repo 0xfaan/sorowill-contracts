@@ -97,6 +97,10 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Unit tests for `get_time_until_deadline` coverage.
+#[cfg(test)]
+mod get_time_until_deadline_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
