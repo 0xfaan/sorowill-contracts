@@ -1244,14 +1244,13 @@ impl WillContract {
         load_will(&env, will_id)
     }
 
-    /// Returns just the lifecycle status of `will_id`, without loading or
-    /// transmitting the rest of the `Will` struct (beneficiaries, guardians,
-    /// balances, etc.).
+    /// Returns just the lifecycle status of `will_id`.
     ///
-    /// Intended for polling use cases — e.g. a dashboard checking the status
-    /// of many wills — where the caller only needs the status and calling
-    /// [`Self::get_will`] would mean deserializing and transmitting data it
-    /// throws away.
+    /// Note: This function still loads the full `Will` struct from persistent
+    /// storage and deserializes it. The dominant cost is the storage read and
+    /// deserialization, not the return-value encoding. Use this method instead
+    /// of [`Self::get_will`] only when you need the status and do not require
+    /// other will fields.
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if no will exists with this id.
@@ -1267,8 +1266,8 @@ impl WillContract {
     ///   (`last_checkin + checkin_period_days`).
     /// - `Triggered`: seconds until the grace period expires
     ///   (`trigger_time + grace_period_days`).
-    /// - `Released`, `Cancelled`, `Settled`: no deadline applies; returns
-    ///   `None`.
+    /// - `PendingConfirmation`, `Released`, `Cancelled`, `Settled`: no deadline
+    ///   applies; returns `None`.
     ///
     /// The returned value is negative when the deadline has already passed
     /// (e.g. an `Active` will whose check-in deadline elapsed but which has
@@ -1277,8 +1276,11 @@ impl WillContract {
     /// treat any non-positive value as "actionable now" rather than treating
     /// only `None` as the past-due signal.
     ///
-    /// Like [`Self::get_will_status`], this avoids loading and transmitting
-    /// the full `Will` struct for simple polling use cases.
+    /// Note: This function still loads the full `Will` struct from persistent
+    /// storage and deserializes it. The dominant cost is the storage read and
+    /// deserialization, not the return-value encoding. Use this method instead
+    /// of [`Self::get_will`] only when you need the deadline and do not require
+    /// other will fields.
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if no will exists with this id.
