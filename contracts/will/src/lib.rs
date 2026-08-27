@@ -105,6 +105,10 @@ mod issue_183_test;
 #[cfg(test)]
 mod issue_184_test;
 
+/// Regression test for issue #185: add_hashed_beneficiary should emit an event.
+#[cfg(test)]
+mod issue_185_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
