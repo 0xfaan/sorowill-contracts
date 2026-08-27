@@ -103,3 +103,46 @@ fn issue_192_batch_create_wills_increments_active_count() {
         "batch_create_wills should increment active_will_count for each will"
     );
 }
+
+/// Issue #194: Regression test for pagination with cursor/limit parameters.
+#[test]
+fn issue_194_get_wills_by_owner_and_status_with_pagination() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary.clone(),
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
+
+    let mut created_ids = SorobanVec::new(&env);
+    for i in 0..5 {
+        let amount = 100_000 + (i as i128) * 10_000;
+        let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), amount)];
+        let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
+        created_ids.push_back(will_id);
+    }
+
+    // Get first page with pagination (limit 2)
+    let page1 = client.get_wills_by_owner_and_status(&owner, &WillStatus::Active, &None, &2);
+    assert_eq!(page1.len(), 2, "First page should have 2 wills");
+
+    if page1.len() > 0 {
+        let last_id_page1 = page1.get_unchecked(page1.len() - 1).id;
+        let page2 = client.get_wills_by_owner_and_status(&owner, &WillStatus::Active, &Some(last_id_page1), &2);
+        assert!(page2.len() > 0, "Second page should have results");
+        assert!(page2.len() <= 2, "Second page should respect limit");
+
+        if page2.len() > 0 {
+            let first_page2_id = page2.get_unchecked(0).id;
+            assert!(first_page2_id > last_id_page1, "Pagination cursor should work correctly");
+        }
+    }
+
+    // Test total count across pages (large limit)
+    let all_wills = client.get_wills_by_owner_and_status(&owner, &WillStatus::Active, &None, &50);
+    assert_eq!(all_wills.len(), 5, "Should get all 5 wills when limit is large enough");
+}

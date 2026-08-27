@@ -1344,15 +1344,29 @@ impl WillContract {
         wills
     }
 
-    /// Returns the full state of every will owned by `owner` with the given `status`.
+    /// Returns a page of wills owned by `owner` with the given `status`.
+    ///
+    /// Supports bounded pagination to avoid hitting Soroban resource limits
+    /// for addresses with many wills.
+    ///
+    /// # Parameters
+    /// - `owner`: the address to query wills for.
+    /// - `status`: the will status to filter by.
+    /// - `cursor`: optional will id to paginate after (exclusive). Pass `None`
+    ///   or `0` for the first page.
+    /// - `limit`: maximum number of wills to return. Capped at
+    ///   [`storage::MAX_PAGE_SIZE`].
     pub fn get_wills_by_owner_and_status(
         env: Env,
         owner: Address,
         status: WillStatus,
+        cursor: Option<u64>,
+        limit: u32,
     ) -> Vec<Will> {
         let ids = storage::get_owner_wills(&env, &owner);
+        let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in ids.iter() {
+        for id in page.iter() {
             let will = match storage::load_will(&env, id) {
                 Ok(w) => w,
                 Err(e) => panic_with_error!(&env, e),
