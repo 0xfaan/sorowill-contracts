@@ -101,6 +101,10 @@ mod test_xdr_spec;
 #[cfg(test)]
 mod issue_183_test;
 
+/// Regression test for issue #184: merge_wills doesn't check primary token match.
+#[cfg(test)]
+mod issue_184_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
