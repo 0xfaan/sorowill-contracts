@@ -109,6 +109,10 @@ mod get_will_status_test;
 #[cfg(test)]
 mod get_contract_version_test;
 
+/// Unit tests for `update_will_settings` coverage.
+#[cfg(test)]
+mod update_will_settings_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
