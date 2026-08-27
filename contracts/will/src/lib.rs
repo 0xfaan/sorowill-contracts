@@ -321,6 +321,7 @@ impl WillContract {
             guardian_structs.push_back(Guardian {
                 address: addr,
                 weight: 1,
+                consent: GuardianConsent::Pending,
             });
         }
 
@@ -1004,6 +1005,7 @@ impl WillContract {
             guardian_structs.push_back(Guardian {
                 address: addr,
                 weight: 1,
+                consent: GuardianConsent::Pending,
             });
         }
         will.guardians = guardian_structs;
@@ -1142,6 +1144,7 @@ impl WillContract {
                 guardian_structs.push_back(Guardian {
                     address: addr,
                     weight: 1,
+                    consent: GuardianConsent::Pending,
                 });
             }
             will.guardians = guardian_structs;
@@ -1444,7 +1447,12 @@ impl WillContract {
         }
 
         let weight = match will.guardians.iter().find(|g| g.address == guardian) {
-            Some(g) => g.weight,
+            Some(g) => {
+                if g.consent != GuardianConsent::Accepted {
+                    panic_with_error!(&env, WillError::GuardianNotConsented);
+                }
+                g.weight
+            }
             None => panic_with_error!(&env, WillError::NotGuardian),
         };
 
@@ -1514,7 +1522,12 @@ impl WillContract {
 
         // Verify the caller is a named guardian and capture their weight.
         let weight = match will.guardians.iter().find(|g| g.address == guardian) {
-            Some(g) => g.weight,
+            Some(g) => {
+                if g.consent != GuardianConsent::Accepted {
+                    panic_with_error!(&env, WillError::GuardianNotConsented);
+                }
+                g.weight
+            }
             None => panic_with_error!(&env, WillError::NotGuardian),
         };
 
@@ -1561,6 +1574,86 @@ impl WillContract {
             let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
             events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
         }
+    }
+
+    /// Allows a named guardian to accept their role on a will.
+    ///
+    /// A guardian must call this to explicitly accept their role before they can
+    /// vote via [`guardian_trigger`]. This ensures guardians actively consent
+    /// before they can force an early release of funds.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to accept guardianship for
+    /// - `guardian`: the guardian address accepting the role; must authorize
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotGuardian`] if `guardian` is not named on this will.
+    pub fn accept_guardian_role(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        let mut found = false;
+        let mut updated_guardians: Vec<Guardian> = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if g.address == guardian {
+                updated_guardians.push_back(Guardian {
+                    address: g.address.clone(),
+                    weight: g.weight,
+                    consent: GuardianConsent::Accepted,
+                });
+                found = true;
+            } else {
+                updated_guardians.push_back(g.clone());
+            }
+        }
+
+        if !found {
+            panic_with_error!(&env, WillError::NotGuardian);
+        }
+
+        will.guardians = updated_guardians;
+        storage::save_will(&env, &will);
+    }
+
+    /// Allows a named guardian to reject their role on a will.
+    ///
+    /// A guardian can reject their role to prevent themselves from voting via
+    /// [`guardian_trigger`]. Once rejected, the guardian cannot vote unless
+    /// explicitly re-added to the guardian list.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to reject guardianship for
+    /// - `guardian`: the guardian address rejecting the role; must authorize
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotGuardian`] if `guardian` is not named on this will.
+    pub fn reject_guardian_role(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        let mut found = false;
+        let mut updated_guardians: Vec<Guardian> = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if g.address == guardian {
+                updated_guardians.push_back(Guardian {
+                    address: g.address.clone(),
+                    weight: g.weight,
+                    consent: GuardianConsent::Rejected,
+                });
+                found = true;
+            } else {
+                updated_guardians.push_back(g.clone());
+            }
+        }
+
+        if !found {
+            panic_with_error!(&env, WillError::NotGuardian);
+        }
+
+        will.guardians = updated_guardians;
+        storage::save_will(&env, &will);
     }
 
     // ── #21: Will cloning / templates ────────────────────────────────────
@@ -1760,6 +1853,7 @@ impl WillContract {
                 guardian_structs.push_back(Guardian {
                     address: addr,
                     weight: 1,
+                    consent: GuardianConsent::Pending,
                 });
             }
 

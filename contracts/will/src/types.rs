@@ -31,15 +31,18 @@ pub struct Beneficiary {
     pub allocation: Allocation,
 }
 
-/// A guardian entry: an address paired with a vote weight.
+/// A guardian entry: an address paired with a vote weight and consent status.
 ///
 /// Guardians with higher weights count for more when reaching quorum.
 /// If all guardians have weight 1, the threshold is a simple majority count.
+/// A guardian must accept their role via `accept_guardian_role` before they
+/// can vote in `guardian_trigger`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Guardian {
     pub address: Address,
     pub weight: u32,
+    pub consent: GuardianConsent,
 }
 
 /// A privacy-preserving beneficiary entry (issue #46).
