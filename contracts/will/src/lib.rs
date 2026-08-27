@@ -109,6 +109,10 @@ mod renounce_validation_test;
 #[cfg(test)]
 mod protocol_stats_test;
 
+/// Contract interface verification test (issue #198).
+#[cfg(test)]
+mod contract_interface_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
