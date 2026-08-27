@@ -105,6 +105,10 @@ mod get_time_until_deadline_test;
 #[cfg(test)]
 mod get_will_status_test;
 
+/// Unit tests for `get_contract_version` coverage.
+#[cfg(test)]
+mod get_contract_version_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
