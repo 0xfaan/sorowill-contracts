@@ -97,6 +97,10 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Unit tests for the `set_delegate` function and delegate-based check-in flow.
+#[cfg(test)]
+mod set_delegate_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
