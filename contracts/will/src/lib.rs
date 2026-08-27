@@ -109,6 +109,10 @@ mod issue_184_test;
 #[cfg(test)]
 mod issue_185_test;
 
+/// Regression test for issue #186: HashedBeneficiary.percentage basis-point scale.
+#[cfg(test)]
+mod issue_186_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
