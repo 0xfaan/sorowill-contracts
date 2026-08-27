@@ -1814,6 +1814,7 @@ impl WillContract {
             };
             storage::save_will(&env, &will);
             storage::index_by_owner(&env, &owner, will_id);
+            storage::increment_active_will_count(&env);
 
             events::will_created(
                 &env,
