@@ -27,8 +27,9 @@
 //! Optionally, up to three guardians may be named on a will; any two of them
 //! calling [`WillContract::guardian_trigger`] force an immediate release,
 //! bypassing the check-in/grace-period flow entirely (e.g. if the owner is
-//! known to be incapacitated). Guardians must first accept their role via
-//! [`WillContract::accept_guardian_role`] before they can vote. Guardian
+//! known to be incapacitated). Guardians are named on the will at creation
+//! time (or via [`WillContract::update_guardians`]) and may vote once the
+//! guardian-list cooldown has elapsed. Guardian
 //! votes expire after a configurable window so stale votes cannot combine
 //! with fresh ones.
 //!
@@ -59,16 +60,6 @@ pub mod fuzz_harness;
 
 #[cfg(test)]
 mod fuzz_test;
-
-// `mod test;` (test.rs, ~5,800 lines) is deliberately NOT wired in here.
-// It predates the current `Allocation`-based `Beneficiary` schema by two
-// generations (197 uses of the old `percentage`/`basis_points` fields, zero
-// of the current `allocation` field) and large sections of it are also
-// physically corrupted from a bad merge (function bodies cut off mid-statement
-// and spliced with fragments of other functions). It would need a ground-up
-// rewrite, not a fix. Current coverage instead comes from `allocation_test`,
-// `event_test`, `beneficiary_lifecycle_test`, `event_snapshot_test`, and
-// `test_xdr_spec`, all of which already target the current schema.
 
 /// Unit tests for the mixed percentage/fixed-amount `Allocation` model.
 #[cfg(test)]
