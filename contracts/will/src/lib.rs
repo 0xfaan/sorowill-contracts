@@ -97,6 +97,10 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Regression test for issue #183: guardian_vote_weight not reset in merge_wills.
+#[cfg(test)]
+mod issue_183_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
