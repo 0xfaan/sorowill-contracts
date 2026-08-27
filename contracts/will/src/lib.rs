@@ -97,6 +97,18 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Pagination tests for `get_wills_by_beneficiary` (issue #195).
+#[cfg(test)]
+mod pagination_test;
+
+/// Validation tests for `renounce_beneficiary` (issue #196).
+#[cfg(test)]
+mod renounce_validation_test;
+
+/// Protocol stats tracking tests for locked value increments (issue #197).
+#[cfg(test)]
+mod protocol_stats_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
@@ -409,6 +421,11 @@ impl WillContract {
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
         storage::increment_active_will_count(&env);
+
+        // Increment locked value for each token in this will
+        for (token_addr, amount) in tokens.iter() {
+            storage::adjust_locked_value(&env, &token_addr, amount);
+        }
 
         record_transition(
             &env,
@@ -976,6 +993,10 @@ impl WillContract {
         // Update indexes: remove the renouncing beneficiary from the reverse index
         storage::remove_beneficiary_index(&env, &beneficiary, will_id);
 
+        // Validate the redistributed beneficiary allocations
+        let will_balance = total_balance(&will.balances);
+        assert_valid_allocations(&env, &will.beneficiaries, will_balance);
+
         // Get the owner for event emission (not changed)
         let owner = will.owner.clone();
         storage::save_will(&env, &will);
@@ -1212,6 +1233,9 @@ impl WillContract {
         will.balances.set(token.clone(), new_balance);
         storage::save_will(&env, &will);
 
+        // Increment locked value for this token
+        storage::adjust_locked_value(&env, &token, amount);
+
         // --- INTERACTIONS: external token transfer after state is committed ---
         token::Client::new(&env, &token).transfer(
             &owner,
@@ -1360,11 +1384,23 @@ impl WillContract {
         wills
     }
 
-    /// Returns every will `beneficiary` is named in.
-    pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
+    /// Returns wills `beneficiary` is named in, with optional pagination.
+    ///
+    /// # Parameters
+    /// - `beneficiary`: the address to query for
+    /// - `cursor`: optional will id to start pagination after (exclusive)
+    /// - `limit`: maximum number of wills to return (capped at MAX_PAGE_SIZE)
+    ///
+    /// # Pagination
+    /// To fetch all wills in pages:
+    /// 1. Call with `cursor=None, limit=N`
+    /// 2. If result has N wills, call again with `cursor=last_will_id`
+    /// 3. Repeat until result has fewer than N wills
+    pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address, cursor: Option<u64>, limit: u32) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
+        let paginated_ids = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in ids.iter() {
+        for id in paginated_ids.iter() {
             wills.push_back(match storage::load_will(&env, id) {
                 Ok(will) => will,
                 Err(e) => panic_with_error!(&env, e),
