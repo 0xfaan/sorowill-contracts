@@ -101,6 +101,10 @@ mod test_xdr_spec;
 #[cfg(test)]
 mod set_delegate_test;
 
+/// Unit tests for the `confirm_will` function and PendingConfirmation state transition.
+#[cfg(test)]
+mod confirm_will_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
