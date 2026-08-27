@@ -97,6 +97,10 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Regression tests for GitHub issues #191, #192, #193, #194.
+#[cfg(test)]
+mod regression_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
@@ -1665,6 +1669,7 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::increment_active_will_count(&env);
 
         events::will_created(
             &env,
