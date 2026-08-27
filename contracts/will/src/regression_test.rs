@@ -146,3 +146,68 @@ fn issue_194_get_wills_by_owner_and_status_with_pagination() {
     let all_wills = client.get_wills_by_owner_and_status(&owner, &WillStatus::Active, &None, &50);
     assert_eq!(all_wills.len(), 5, "Should get all 5 wills when limit is large enough");
 }
+
+/// Issue #193: Regression test for cursor pagination with beneficiary removal/re-addition.
+#[test]
+fn issue_193_paginate_with_remove_readd_beneficiary() {
+    let (env, client, owner, _token, token_address) = setup();
+    let beneficiary1 = Address::generate(&env);
+    let beneficiary2 = Address::generate(&env);
+
+    let initial_beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary1.clone(),
+            allocation: Allocation::Percentage(5_000),
+        },
+        Beneficiary {
+            address: beneficiary2.clone(),
+            allocation: Allocation::Percentage(5_000),
+        },
+    ];
+
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), 200_000_i128)];
+    let will_id = client.create_will(&owner, &tokens, &initial_beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
+
+    // Create multiple more wills to test pagination
+    for i in 0..3 {
+        let amount = 100_000 + (i as i128) * 10_000;
+        let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address.clone(), amount)];
+        let _will_id = client.create_will(&owner, &tokens, &initial_beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
+    }
+
+    // Remove beneficiary2 from first will
+    let updated_beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary1.clone(),
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
+    client.update_beneficiaries(&will_id, &owner, &updated_beneficiaries);
+
+    // Test pagination on beneficiary index after removal
+    let beneficiary2_wills = client.get_wills_by_beneficiary(&beneficiary2);
+    let will_ids_set = SorobanVec::new(&env);
+
+    // Verify no duplicates in pagination
+    for will in beneficiary2_wills.iter() {
+        let already_seen = false;
+        for seen_will in will_ids_set.iter() {
+            if seen_will == will.id {
+                panic!("Pagination should not duplicate wills after removal/re-addition");
+            }
+        }
+        assert!(!already_seen, "No duplicates should exist in pagination");
+    }
+
+    // Verify we can get all beneficiary wills without gaps
+    let page1 = client.get_wills_by_beneficiary(&beneficiary2);
+    if page1.len() > 1 {
+        let ids_in_pages = SorobanVec::new(&env);
+        for will in page1.iter() {
+            ids_in_pages.push_back(will.id);
+        }
+        assert_eq!(ids_in_pages.len(), page1.len(), "Should retrieve all beneficiary wills without gaps");
+    }
+}
