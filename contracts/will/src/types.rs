@@ -67,15 +67,6 @@ pub struct HashedBeneficiary {
 ///   |--(cancel_will)--> Cancelled   |--(emergency_checkin)--> Active
 ///   |--(partial_release)--> Active  (balance reduced, subset paid)
 /// ```
-///
-/// When a vesting schedule is configured, the lifecycle after grace-period
-/// expiry is:
-///
-/// ```text
-/// Triggered --(grace period expires + vesting configured)--> Vesting
-/// Vesting --(claim_vested)--> Vesting  (partial unlock)
-/// Vesting --(final claim)--> Released
-/// ```
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WillStatus {

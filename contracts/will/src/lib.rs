@@ -648,14 +648,6 @@ impl WillContract {
     /// their configured percentages. Callable by anyone once the grace
     /// period has fully elapsed.
     ///
-    /// If a vesting schedule is configured, instead of releasing everything
-    /// at once, this transitions the will to `Vesting` status and records
-    /// the start time. Beneficiaries then call `claim_vested` to unlock
-    /// their share gradually.
-    ///
-    /// If no vesting schedule is configured, behaves exactly as before:
-    /// full lump-sum release.
-    ///
     /// In push mode (the default), tokens are transferred directly to each
     /// beneficiary. In pull mode (`pull_distribution = true`), shares are
     /// stored in claimable-shares storage and beneficiaries must call
