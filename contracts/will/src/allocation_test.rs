@@ -224,3 +224,35 @@ fn will_partialeq_allows_single_assert() {
     assert_eq!(will_first.checkin_period_days, 30);
     assert_eq!(will_first.grace_period_days, 7);
 }
+
+/// Three-way equal percentage split with rounding remainder absorbed by the
+/// last beneficiary. Validates that the rounding behavior is consistent across
+/// multiple beneficiaries and that the total distributed equals the initial balance.
+#[test]
+fn three_way_percentage_split_with_remainder() {
+    let (env, client, owner, token, token_address) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let charlie = Address::generate(&env);
+
+    let beneficiaries: SorobanVec<Beneficiary> = vec![
+        &env,
+        Beneficiary { address: alice.clone(), allocation: Allocation::Percentage(3_333) },
+        Beneficiary { address: bob.clone(), allocation: Allocation::Percentage(3_333) },
+        Beneficiary { address: charlie.clone(), allocation: Allocation::Percentage(3_334) },
+    ];
+    let tokens: SorobanVec<(Address, i128)> = vec![&env, (token_address, 1_000_000_i128)];
+
+    let will_id = client.create_will(&owner, &tokens, &beneficiaries, &90, &7, &vec![&env], &2, &None, &0);
+    release(&env, &client, will_id);
+
+    let alice_balance = token.balance(&alice);
+    let bob_balance = token.balance(&bob);
+    let charlie_balance = token.balance(&charlie);
+
+    assert_eq!(alice_balance, 333_300);
+    assert_eq!(bob_balance, 333_300);
+    assert_eq!(charlie_balance, 333_400);
+    assert_eq!(token.balance(&client.address), 0);
+    assert_eq!(alice_balance + bob_balance + charlie_balance, 1_000_000);
+}
