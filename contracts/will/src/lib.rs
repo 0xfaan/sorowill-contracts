@@ -97,6 +97,10 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Coverage for `get_protocol_stats` (#211).
+#[cfg(test)]
+mod protocol_stats_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
