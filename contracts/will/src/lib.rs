@@ -101,6 +101,10 @@ mod test_xdr_spec;
 #[cfg(test)]
 mod guardian_cancel_test;
 
+/// Unit tests for `clone_will` (#216).
+#[cfg(test)]
+mod clone_will_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
