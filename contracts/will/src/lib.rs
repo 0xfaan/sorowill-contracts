@@ -105,6 +105,10 @@ mod guardian_cancel_test;
 #[cfg(test)]
 mod clone_will_test;
 
+/// Unit tests for `batch_create_wills` (#217).
+#[cfg(test)]
+mod batch_create_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
