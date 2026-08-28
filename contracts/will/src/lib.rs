@@ -109,6 +109,10 @@ mod clone_will_test;
 #[cfg(test)]
 mod batch_create_test;
 
+/// Unit tests for the per-will schema migration `migrate_will` (#218).
+#[cfg(test)]
+mod migrate_will_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
