@@ -105,6 +105,10 @@ mod protocol_stats_test;
 #[cfg(test)]
 mod triggered_wills_test;
 
+/// Coverage for `get_wills_by_owner_and_status` (#213).
+#[cfg(test)]
+mod wills_by_owner_status_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
