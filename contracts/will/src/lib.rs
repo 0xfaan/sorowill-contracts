@@ -101,6 +101,10 @@ mod test_xdr_spec;
 #[cfg(test)]
 mod protocol_stats_test;
 
+/// Coverage for `get_triggered_wills` (#212).
+#[cfg(test)]
+mod triggered_wills_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
