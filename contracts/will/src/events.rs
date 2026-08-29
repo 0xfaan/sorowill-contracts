@@ -253,7 +253,27 @@ pub fn beneficiary_renounced(env: &Env, will_id: u64, beneficiary: &Address, own
     );
 }
 
-/// Published when multiple will settings (beneficiaries, guardians, periods) are updated atomically.
+/// Published when multiple will settings (beneficiaries, guardians, periods) are updated atomically
+/// via [`crate::WillContract::update_will_settings`].
+///
+/// `update_fields` is a `Vec<Symbol>` listing every field that was changed in this call.
+/// The possible symbols are:
+///
+/// | Symbol     | Meaning                              |
+/// |------------|--------------------------------------|
+/// | `"benef"`  | Beneficiary list was replaced        |
+/// | `"guard"`  | Guardian list was replaced           |
+/// | `"checkin"`| Check-in period (days) was changed   |
+/// | `"grace"`  | Grace period (days) was changed      |
+///
+/// This is the **canonical** way to detect which fields changed when using the composite
+/// entry point. Inspect `update_fields` for `"guard"` to detect a guardian change made
+/// through `update_will_settings`.
+///
+/// When a guardian change is included, this event is emitted **together with**
+/// [`guardians_updated`] so that off-chain consumers subscribed to the dedicated
+/// `"guardup"` topic receive the notification consistently, regardless of which
+/// entry point (`update_guardians` or `update_will_settings`) made the change.
 pub fn will_settings_updated(env: &Env, will_id: u64, owner: &Address, update_fields: &Vec<Symbol>) {
     env.events().publish(
         (symbol_short!("setupd"), will_id),

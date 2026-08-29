@@ -31,6 +31,25 @@ pub struct Beneficiary {
     pub allocation: Allocation,
 }
 
+/// Whether a named guardian has explicitly accepted or rejected their role.
+///
+/// Guardians start as `Pending` when added to a will (either at creation or
+/// via `update_guardians` / `update_will_settings`). They must call
+/// `accept_guardian_role` to move to `Accepted` before they can vote via
+/// `guardian_trigger` or `guardian_cancel_trigger`. Calling
+/// `reject_guardian_role` moves them to `Rejected` and permanently prevents
+/// voting unless the guardian is removed and re-added to the list.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuardianConsent {
+    /// The guardian has not yet responded to their role invitation.
+    Pending,
+    /// The guardian has explicitly accepted their role and may vote.
+    Accepted,
+    /// The guardian has explicitly rejected their role and may not vote.
+    Rejected,
+}
+
 /// A guardian entry: an address paired with a vote weight and consent status.
 ///
 /// Guardians with higher weights count for more when reaching quorum.
