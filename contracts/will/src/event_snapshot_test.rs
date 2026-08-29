@@ -23,7 +23,7 @@ use soroban_sdk::{
 
 use crate::{
     events,
-    types::{Allocation, Beneficiary},
+    types::{Allocation, Beneficiary, Guardian, GuardianConsent},
     WillContract, WillContractClient,
 };
 
@@ -280,17 +280,27 @@ fn test_guardians_updated_event_snapshot() {
     let (env, owner, contract_id, _client) = setup_test_env();
     
     let will_id = 12345u64;
-    
+    let guardian_addr = Address::generate(&env);
+    let guardians = vec![
+        &env,
+        Guardian {
+            address: guardian_addr,
+            weight: 1,
+            consent: GuardianConsent::Pending,
+        },
+    ];
+
     env.as_contract(&contract_id, || {
-        events::guardians_updated(&env, will_id, &owner);
+        events::guardians_updated(&env, will_id, &owner, &guardians);
     });
-    
+
     // Verify guardians_updated event
     let event_data = find_event_by_topic(&env, symbol_short!("guardup"), Some(will_id))
         .expect("guardians_updated event not found");
-    
-    let data: Address = event_data.try_into_val(&env).unwrap();
-    assert_eq!(data, owner, "event owner mismatch");
+
+    let data: (Address, soroban_sdk::Vec<Guardian>) = event_data.try_into_val(&env).unwrap();
+    assert_eq!(data.0, owner, "event owner mismatch");
+    assert_eq!(data.1, guardians, "event guardians mismatch");
 }
 
 #[test]

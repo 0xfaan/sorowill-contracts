@@ -114,8 +114,8 @@ use soroban_sdk::{
 
 pub use errors::WillError;
 pub use types::{
-    Allocation, Beneficiary, Guardian, GuardianVoteReason, HashedBeneficiary, ProtocolStats, Will,
-    WillStatus, WillStatusTransition,
+    Allocation, Beneficiary, Guardian, GuardianConsent, GuardianVoteReason, HashedBeneficiary,
+    ProtocolStats, Will, WillStatus, WillStatusTransition,
 };
 
 /// Semantic version of the contract logic, encoded as
@@ -1036,7 +1036,7 @@ impl WillContract {
         will.guardian_vote_weight = 0;
         storage::save_will(&env, &will);
 
-        events::guardians_updated(&env, will_id, &owner);
+        events::guardians_updated(&env, will_id, &owner, &will.guardians);
     }
 
     /// Updates the check-in and/or grace period for an active will.
@@ -1733,6 +1733,8 @@ impl WillContract {
     /// - [`WillError::WillNotFound`] if the source will does not exist.
     /// - [`WillError::ZeroAmount`] if any token amount is not positive.
     /// - [`WillError::TooManyBeneficiaries`] if the token list is empty or too large.
+    /// - [`WillError::FixedAmountExceedsBalance`] if the source's
+    ///   `Allocation::FixedAmount` beneficiaries no longer fit the new balance.
     #[allow(clippy::too_many_arguments)]
     pub fn clone_will(
         env: Env,
@@ -1762,6 +1764,12 @@ impl WillContract {
             let prev = balances.get(token_addr.clone()).unwrap_or(0);
             balances.set(token_addr, prev + amount);
         }
+
+        // Re-validate `FixedAmount` beneficiaries against the clone's new
+        // balance (#239): funding a clone with less than the original
+        // fixed-amount commitments must fail loudly here rather than
+        // silently under-paying at distribute() time.
+        assert_valid_allocations(&env, &source.beneficiaries, total_balance(&balances));
 
         let will_id = storage::next_will_id(&env);
         let now = env.ledger().timestamp();
@@ -2146,10 +2154,10 @@ impl WillContract {
     /// Carves a subset of beneficiaries and balance out of an existing will
     /// into a new, fully independent child will.
     ///
-    /// The original will's balance is reduced by `amount` and any beneficiaries
+    /// The original will's balance is reduced by `tokens` and any beneficiaries
     /// present in `beneficiaries_to_split` are removed from it; the new will
     /// receives those beneficiaries with percentages renormalised to 100, and
-    /// it starts `Active` with the same token, check-in period, grace period,
+    /// it starts `Active` with the same check-in period, grace period,
     /// co-owners, and threshold as the original.
     ///
     /// # Parameters
@@ -2157,36 +2165,62 @@ impl WillContract {
     /// - `owner`: must be the primary owner of the source will.
     /// - `beneficiaries_to_split`: subset of beneficiaries to move to the new will.
     ///   Their percentages will be renormalised to sum to 100 in the child will.
-    /// - `amount`: token amount to transfer into the new will. Must be > 0 and
-    ///   ≤ the source will's balance.
+    /// - `tokens`: `(token_address, amount)` pairs to move from the source
+    ///   will's balances into the child will, mirroring `create_will`'s
+    ///   multi-token API. Each `amount` must be > 0 and no greater than what
+    ///   the source will currently holds of that token; duplicate token
+    ///   addresses are summed. Every token the split-out beneficiaries need
+    ///   access to must be listed here — a token left out of `tokens` stays
+    ///   on the source will and is not moved to the child.
     ///
     /// # Returns
     /// The id of the newly created child will.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] / [`WillError::WillNotActive`]
-    /// - [`WillError::ZeroAmount`] / [`WillError::InsufficientBalance`]
+    /// - [`WillError::TooManyBeneficiaries`] if `tokens` is empty or exceeds
+    ///   `MAX_TOKENS`.
+    /// - [`WillError::ZeroAmount`] if any token amount is not positive.
+    /// - [`WillError::InsufficientBalance`] if a requested token amount
+    ///   exceeds what the source will holds of that token.
     /// - [`WillError::InvalidSplit`] if `beneficiaries_to_split` is empty or would
     ///   leave the source will with no beneficiaries.
+    /// - [`WillError::FixedAmountExceedsBalance`] if either the remaining or
+    ///   split beneficiary list has `Allocation::FixedAmount` entries that no
+    ///   longer fit the resulting balance.
     pub fn split_will(
         env: Env,
         will_id: u64,
         owner: Address,
         beneficiaries_to_split: Vec<Beneficiary>,
-        amount: i128,
+        tokens: Vec<(Address, i128)>,
     ) -> u64 {
         owner.require_auth();
         let mut source = load_owned(&env, will_id, &owner);
         assert_status(&env, &source, WillStatus::Active, WillError::WillNotActive);
 
-        if amount <= 0 {
-            panic_with_error!(&env, WillError::ZeroAmount);
-        }
-        if amount > source.balance {
-            panic_with_error!(&env, WillError::InsufficientBalance);
+        if tokens.is_empty() || tokens.len() > MAX_TOKENS {
+            panic_with_error!(&env, WillError::TooManyBeneficiaries);
         }
         if beneficiaries_to_split.is_empty() {
             panic_with_error!(&env, WillError::InvalidSplit);
+        }
+
+        // Accumulate requested amounts per token (duplicates are additive),
+        // then verify each against what the source will actually holds.
+        let mut child_balances: Map<Address, i128> = Map::new(&env);
+        for (token_addr, amt) in tokens.iter() {
+            if amt <= 0 {
+                panic_with_error!(&env, WillError::ZeroAmount);
+            }
+            let prev = child_balances.get(token_addr.clone()).unwrap_or(0);
+            child_balances.set(token_addr, prev + amt);
+        }
+        for (token_addr, amt) in child_balances.iter() {
+            let held = source.balances.get(token_addr.clone()).unwrap_or(0);
+            if amt > held {
+                panic_with_error!(&env, WillError::InsufficientBalance);
+            }
         }
 
         // Build a set of addresses being split out to verify they exist in the
@@ -2215,19 +2249,33 @@ impl WillContract {
         let normalised_remaining = renormalize_percentages(&env, &remaining_beneficiaries);
         let normalised_split = renormalize_percentages(&env, &beneficiaries_to_split);
 
+        // Move every requested token amount out of the source's balances and
+        // into the child's. `token`/`balance` mirror the primary (first)
+        // token in `tokens`, same as `balances`, which remains the
+        // authoritative multi-token ledger.
+        for (token_addr, amt) in child_balances.iter() {
+            let held = source.balances.get(token_addr.clone()).unwrap_or(0);
+            source.balances.set(token_addr, held - amt);
+        }
+        source.balance = source.balances.get(source.token.clone()).unwrap_or(0);
+
+        let (primary_token, _) = tokens.get_unchecked(0);
+        let primary_amount = child_balances.get(primary_token.clone()).unwrap_or(0);
+        let child_token_count = child_balances.len();
+
+        // Re-validate `FixedAmount` beneficiaries against each side's new
+        // balance before committing anything (#239): a split funded with
+        // less than the original fixed-amount commitments must fail loudly
+        // here rather than silently under-paying at distribute() time.
+        assert_valid_allocations(&env, &normalised_remaining, total_balance(&source.balances));
+        assert_valid_allocations(&env, &normalised_split, total_balance(&child_balances));
+
         // Remove split-off beneficiaries from the source index and add them to
         // the child's index.
         for b in beneficiaries_to_split.iter() {
             storage::remove_beneficiary_index(&env, &b.address, will_id);
         }
 
-        // Update source will. `token`/`balance` mirror the primary token, same
-        // as `balances`, which remains the authoritative multi-token ledger.
-        let prev_primary = source.balances.get(source.token.clone()).unwrap_or(0);
-        source
-            .balances
-            .set(source.token.clone(), prev_primary - amount);
-        source.balance -= amount;
         source.beneficiaries = normalised_remaining;
         storage::save_will(&env, &source);
 
@@ -2239,16 +2287,13 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &b.address, new_id);
         }
 
-        let mut child_balances: Map<Address, i128> = Map::new(&env);
-        child_balances.set(source.token.clone(), amount);
-
         let child = Will {
             id: new_id,
             owner: source.owner.clone(),
             balances: child_balances,
-            token: source.token.clone(),
-            is_native: source.is_native,
-            balance: amount,
+            token: primary_token,
+            is_native: false,
+            balance: primary_amount,
             beneficiaries: normalised_split.clone(),
             hashed_beneficiaries: Vec::new(&env),
             checkin_period_days: source.checkin_period_days,
@@ -2270,13 +2315,14 @@ impl WillContract {
         };
         storage::save_will(&env, &child);
         storage::index_by_owner(&env, &source.owner, new_id);
+        storage::increment_active_will_count(&env);
 
-        events::will_split(&env, will_id, new_id, &owner, amount);
+        events::will_split(&env, will_id, new_id, &owner, primary_amount);
         events::will_created(
             &env,
             new_id,
             &owner,
-            1,
+            child_token_count,
             &normalised_split,
             now + source.checkin_period_days * SECONDS_PER_DAY,
         );

@@ -31,6 +31,21 @@ pub struct Beneficiary {
     pub allocation: Allocation,
 }
 
+/// Consent status for a named guardian.
+///
+/// A guardian must explicitly accept before they can cast a `guardian_trigger`
+/// vote. The owner may also reject a guardian's acceptance.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuardianConsent {
+    /// Guardian has been named but has not yet responded.
+    Pending,
+    /// Guardian has accepted the role and may vote.
+    Accepted,
+    /// Guardian has declined the role.
+    Rejected,
+}
+
 /// A guardian entry: an address paired with a vote weight and consent status.
 ///
 /// Guardians with higher weights count for more when reaching quorum.
