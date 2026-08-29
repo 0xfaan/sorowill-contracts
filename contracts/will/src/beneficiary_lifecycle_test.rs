@@ -152,3 +152,62 @@ fn release_pays_the_latest_of_several_beneficiary_updates() {
     assert_eq!(token.balance(&second), 0);
     assert_eq!(token.balance(&third), 1_000_000);
 }
+
+/// Verify that attempting to update beneficiaries after the will is triggered
+/// (i.e., when in Triggered status) is rejected, as beneficiaries can only be
+/// modified while the will is Active.
+#[test]
+fn update_beneficiaries_rejected_after_trigger() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_address = sac.address();
+    StellarAssetClient::new(&env, &token_address).mint(&owner, &1_000_000);
+    let _token = TokenClient::new(&env, &token_address);
+
+    let contract_id = env.register(WillContract, ());
+    let client = WillContractClient::new(&env, &contract_id);
+
+    let original = Address::generate(&env);
+    let new_beneficiary = Address::generate(&env);
+
+    let will_id = client.create_will(
+        &owner,
+        &vec![&env, (token_address.clone(), 1_000_000_i128)],
+        &vec![
+            &env,
+            Beneficiary {
+                address: original.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+        &90,
+        &7,
+        &vec![&env],
+        &2,
+        &None,
+        &0,
+    );
+
+    // Advance past check-in deadline and trigger the will
+    env.ledger().with_mut(|l| l.timestamp += 91 * DAY);
+    client.trigger_will(&will_id);
+
+    // The will is now Triggered; attempting to update beneficiaries should fail
+    let result = client.try_update_beneficiaries(
+        &will_id,
+        &owner,
+        &vec![
+            &env,
+            Beneficiary {
+                address: new_beneficiary.clone(),
+                allocation: Allocation::Percentage(10_000),
+            },
+        ],
+    );
+
+    assert!(result.is_err(), "update_beneficiaries must be rejected after trigger");
+}
