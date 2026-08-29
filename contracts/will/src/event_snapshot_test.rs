@@ -17,6 +17,7 @@
 use soroban_sdk::{
     symbol_short,
     testutils::{Address as _, Events, Ledger},
+    token::StellarAssetClient,
     vec, Address, Env, TryIntoVal,
 };
 
@@ -651,4 +652,82 @@ fn test_event_ordering_lifecycle() {
         event_symbols, expected_sequence,
         "Event sequence does not match expected lifecycle order"
     );
+}
+
+/// Test that verifies event snapshots are correctly generated when a will holds
+/// multiple tokens with mixed allocation strategies (fixed amounts and percentages).
+#[test]
+fn test_multi_token_event_snapshot_with_mixed_allocations() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_700_000_000);
+
+    let owner = Address::generate(&env);
+
+    // Create two tokens
+    let sac_a = env.register_stellar_asset_contract_v2(owner.clone());
+    let token_a = sac_a.address();
+    StellarAssetClient::new(&env, &token_a).mint(&owner, &2_000_000_i128);
+
+    let token_b_admin = Address::generate(&env);
+    let sac_b = env.register_stellar_asset_contract_v2(token_b_admin.clone());
+    let token_b = sac_b.address();
+    StellarAssetClient::new(&env, &token_b).mint(&owner, &1_500_000_i128);
+
+    let contract_id = env.register(WillContract, ());
+    let _client = WillContractClient::new(&env, &contract_id);
+
+    let beneficiary_a = Address::generate(&env);
+    let beneficiary_b = Address::generate(&env);
+
+    let beneficiaries = vec![
+        &env,
+        Beneficiary {
+            address: beneficiary_a.clone(),
+            allocation: Allocation::FixedAmount(500_000),
+        },
+        Beneficiary {
+            address: beneficiary_b.clone(),
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
+
+    let tokens = vec![
+        &env,
+        (token_a.clone(), 2_000_000_i128),
+        (token_b.clone(), 1_500_000_i128),
+    ];
+
+    env.as_contract(&contract_id, || {
+        let will_id = 12345u64;
+        let token_count = 2u32;
+        events::will_created(&env, will_id, &owner, token_count, &beneficiaries, env.ledger().timestamp() + 7776000);
+    });
+
+    // Verify the event was emitted correctly
+    let all_events = env.events().all();
+    let mut found = false;
+
+    for event in all_events.iter() {
+        if event.1.is_empty() {
+            continue;
+        }
+        let topic0: Result<soroban_sdk::Symbol, _> = event.1.get(0).unwrap().try_into_val(&env);
+        if topic0 != Ok(symbol_short!("created")) {
+            continue;
+        }
+
+        found = true;
+        let data: (Address, u32, soroban_sdk::Vec<Beneficiary>, u64) =
+            event.2.try_into_val(&env).unwrap();
+        assert_eq!(data.0, owner, "event owner must match creator");
+        assert_eq!(data.1, 2, "event must report two tokens");
+        assert_eq!(
+            data.2, beneficiaries,
+            "event beneficiary list must match"
+        );
+        assert_eq!(data.2.len(), 2, "must have two beneficiaries");
+    }
+
+    assert!(found, "will_created event must be emitted for multi-token will");
 }

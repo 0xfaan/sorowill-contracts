@@ -93,4 +93,6 @@ pub enum WillError {
     /// An owner or beneficiary index list is already at
     /// `MAX_WILLS_PER_INDEX` and cannot accept another will id.
     TooManyWills = 37,
+    /// A guardian has not accepted their role and cannot vote.
+    GuardianNotConsented = 38,
 }
