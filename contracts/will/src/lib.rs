@@ -108,6 +108,20 @@ mod merge_rounding_test;
 #[cfg(test)]
 mod merge_fixed_amount_test;
 
+/// Regression coverage for hashed-beneficiary registration, preimage verification,
+/// and payout math.
+#[cfg(test)]
+mod hashed_beneficiary_test;
+
+/// Regression test for issue #185: hashed beneficiary updates must emit events.
+#[cfg(test)]
+mod issue_185_test;
+
+/// Regression test for issue #186: hashed-beneficiary percentage math must use
+/// the contract's basis-point scale.
+#[cfg(test)]
+mod issue_186_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
