@@ -47,7 +47,7 @@
     "Beneficiary": ["address: Address", "basis_points: u32"],
     "Guardian": ["address: Address", "weight: u32"],
     "WillStatus": ["Active", "Triggered", "Released", "Cancelled", "Settled"],
-    "GuardianConsent": ["Pending", "Accepted", "Rejected"],
+
     "GuardianVoteReason": ["Deceased", "Incapacitated", "Unreachable", "Other"],
     "ProtocolStats": ["active_will_count: u64", "total_locked_by_token: Vec<TokenLockedBalance>"],
     "TokenLockedBalance": ["token: Address", "total_locked: i128"],
