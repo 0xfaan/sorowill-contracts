@@ -97,6 +97,26 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
+/// Regression test for issue #190: ensure `distribute()` uses the overflow-safe
+/// `proportional_share` helper for beneficiary-payout calculations.
+#[cfg(test)]
+mod distribute_overflow_safety_test;
+
+/// Regression test for issue #187: ensure `merge_wills` decrements the active
+/// will count when marking the merged will as cancelled.
+#[cfg(test)]
+mod merge_active_count_test;
+
+/// Regression test for issue #188: ensure `merge_beneficiaries` does not silently
+/// drop a beneficiary whose merged share rounds down to 0 basis points.
+#[cfg(test)]
+mod merge_rounding_test;
+
+/// Regression test for issue #189: ensure `merge_wills` preserves `Allocation::FixedAmount`
+/// beneficiaries' fixed-amount semantics instead of converting to `Allocation::Percentage`.
+#[cfg(test)]
+mod merge_fixed_amount_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
@@ -1956,6 +1976,9 @@ impl WillContract {
         will_b.balance = 0;
         will_b.status = WillStatus::Cancelled;
 
+        // Decrement active will count since will_b is now cancelled
+        storage::decrement_active_will_count(&env);
+
         // Save both wills
         storage::save_will(&env, &will_a);
         storage::save_will(&env, &will_b);
@@ -2669,10 +2692,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
 
 /// Merges beneficiaries from two wills, recalculating percentages proportionally
 /// based on the combined balance. If a beneficiary appears in both wills, their
-/// percentages are summed before recalculation.
+/// percentages are summed before recalculation. Preserves `FixedAmount` allocation
+/// types where applicable.
 fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficiary> {
     let total_balance = will_a.balance + will_b.balance;
     let mut beneficiary_shares: Vec<(Address, i128)> = Vec::new(env);
+    let mut beneficiary_allocations: Vec<(Address, Allocation)> = Vec::new(env);
 
     for (beneficiaries, will_balance) in [
         (&will_a.beneficiaries, will_a.balance),
@@ -2685,6 +2710,7 @@ fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficia
             };
             let mut found = false;
             let mut updated_shares: Vec<(Address, i128)> = Vec::new(env);
+            let mut updated_allocations: Vec<(Address, Allocation)> = Vec::new(env);
             for (addr, existing_share) in beneficiary_shares.iter() {
                 if addr == beneficiary.address {
                     updated_shares.push_back((addr, existing_share + share));
@@ -2693,50 +2719,117 @@ fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficia
                     updated_shares.push_back((addr, existing_share));
                 }
             }
+            // Track original allocation type: prefer FixedAmount if either will has it
+            for (addr, existing_alloc) in beneficiary_allocations.iter() {
+                if addr == beneficiary.address {
+                    // If either the existing or new allocation is FixedAmount, preserve it
+                    let merged_alloc = match (existing_alloc, beneficiary.allocation) {
+                        (Allocation::FixedAmount(amt_a), Allocation::FixedAmount(amt_b)) => {
+                            Allocation::FixedAmount(amt_a + amt_b)
+                        },
+                        (Allocation::FixedAmount(amt), _) => Allocation::FixedAmount(amt),
+                        (_, Allocation::FixedAmount(amt)) => Allocation::FixedAmount(amt),
+                        (Allocation::Percentage(_), Allocation::Percentage(_)) => {
+                            existing_alloc.clone()
+                        },
+                    };
+                    updated_allocations.push_back((addr, merged_alloc));
+                } else {
+                    updated_allocations.push_back((addr, existing_alloc.clone()));
+                }
+            }
             if found {
                 beneficiary_shares = updated_shares;
+                beneficiary_allocations = updated_allocations;
             } else {
                 beneficiary_shares.push_back((beneficiary.address.clone(), share));
+                beneficiary_allocations.push_back((beneficiary.address.clone(), beneficiary.allocation));
             }
         }
     }
 
     // Recalculate basis-point percentages from combined shares.
+    // Ensure no beneficiary with a non-zero share is silently dropped due to rounding.
+    // Preserve FixedAmount allocations where applicable.
     let mut merged_beneficiaries: Vec<Beneficiary> = Vec::new(env);
     let mut total_bp: u32 = 0;
+    let mut total_fixed: i128 = 0;
     let count = beneficiary_shares.len();
 
     for (i, (addr, share)) in beneficiary_shares.iter().enumerate() {
-        let bp = if total_balance > 0 {
-            ((share * 10_000) / total_balance) as u32
-        } else {
-            0
+        // Find the original allocation type for this beneficiary
+        let original_allocation = beneficiary_allocations.iter()
+            .find(|(a, _)| a == addr)
+            .map(|(_, alloc)| alloc);
+
+        let allocation = match original_allocation {
+            Some(Allocation::FixedAmount(amt)) => {
+                total_fixed += amt;
+                Allocation::FixedAmount(amt)
+            },
+            _ => {
+                // Convert to percentage for non-fixed-amount beneficiaries
+                let bp = if total_balance > 0 {
+                    ((share * 10_000) / total_balance) as u32
+                } else {
+                    0
+                };
+
+                // Include all beneficiaries: those with bp > 0, or those with share > 0 but bp = 0
+                // (they get 1 bp to prevent silent dropping), or the last one (for remainder).
+                if bp > 0 || (share > 0 && bp == 0) || (i as u32) == count - 1 {
+                    let final_bp = if bp > 0 { bp } else if share > 0 { 1 } else { 0 };
+                    if final_bp > 0 {
+                        total_bp += final_bp;
+                    }
+                    Allocation::Percentage(final_bp)
+                } else {
+                    continue;
+                }
+            },
         };
-        if bp > 0 || (i as u32) == count - 1 {
-            merged_beneficiaries.push_back(Beneficiary {
-                address: addr,
-                allocation: Allocation::Percentage(bp),
-            });
-            total_bp += bp;
-        }
+
+        merged_beneficiaries.push_back(Beneficiary {
+            address: addr,
+            allocation,
+        });
     }
 
-    // Handle rounding: assign remainder to the last beneficiary.
+    // Handle rounding: assign remainder to the last percentage-based beneficiary
+    // to reach exactly 10,000 bp. FixedAmount beneficiaries keep their exact amounts.
     if total_bp < 10_000 && !merged_beneficiaries.is_empty() {
         let remainder = 10_000 - total_bp;
-        let last_index = merged_beneficiaries.len() - 1;
-        let last_beneficiary = merged_beneficiaries.get(last_index).unwrap();
-        let new_bp = match last_beneficiary.allocation {
-            Allocation::Percentage(bp) => bp + remainder,
-            Allocation::FixedAmount(_) => remainder,
-        };
-        merged_beneficiaries.set(
-            last_index,
-            Beneficiary {
-                address: last_beneficiary.address,
-                allocation: Allocation::Percentage(new_bp),
-            },
-        );
+        // Find the last percentage-based beneficiary to assign the remainder
+        for i in (0..merged_beneficiaries.len()).rev() {
+            let beneficiary = merged_beneficiaries.get(i).unwrap();
+            if let Allocation::Percentage(bp) = beneficiary.allocation {
+                merged_beneficiaries.set(
+                    i,
+                    Beneficiary {
+                        address: beneficiary.address,
+                        allocation: Allocation::Percentage(bp + remainder),
+                    },
+                );
+                break;
+            }
+        }
+    } else if total_bp > 10_000 && !merged_beneficiaries.is_empty() {
+        // If we exceeded 10_000 due to giving everyone at least 1 bp, reduce the last percentage beneficiary
+        let excess = total_bp - 10_000;
+        for i in (0..merged_beneficiaries.len()).rev() {
+            let beneficiary = merged_beneficiaries.get(i).unwrap();
+            if let Allocation::Percentage(bp) = beneficiary.allocation {
+                let new_bp = if bp > excess { bp - excess } else { 1 };
+                merged_beneficiaries.set(
+                    i,
+                    Beneficiary {
+                        address: beneficiary.address,
+                        allocation: Allocation::Percentage(new_bp),
+                    },
+                );
+                break;
+            }
+        }
     }
 
     merged_beneficiaries
