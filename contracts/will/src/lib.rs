@@ -97,6 +97,10 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod triggered_wills_test;
 
+/// Guarded-release and cooldown regression tests for guardian voting.
+#[cfg(test)]
+mod guardian_cancel_test;
+
 /// XDR spec fixture test for `create_will` encoding stability (#4).
 #[cfg(test)]
 mod test_xdr_spec;
