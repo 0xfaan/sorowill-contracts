@@ -1225,6 +1225,14 @@ impl WillContract {
 
         // --- EFFECTS: update state and persist before the external transfer ---
         will.balances.set(token.clone(), new_balance);
+        // `will.balance` is a legacy mirror of `will.balances[will.token]` kept
+        // for backward compatibility until callers migrate fully to the
+        // multi-token map; it must be kept in sync here or every reader that
+        // still trusts it (e.g. split_will's balance check, reveal_and_claim's
+        // share computation) will silently operate on a stale figure.
+        if token == will.token {
+            will.balance = new_balance;
+        }
         storage::save_will(&env, &will);
 
         // Increment locked value for this token
@@ -2076,6 +2084,15 @@ impl WillContract {
             combined_balances.set(token_addr, prev + amount);
         }
 
+        // Clear persistent GuardianVote/GuardianCancelVote entries for both
+        // wills' *pre-merge* guardian lists before the in-memory counters are
+        // zeroed below — otherwise the vote rows are orphaned in storage
+        // forever and could be miscounted if a guardian address is reused.
+        storage::reset_guardian_votes(&env, &will_a);
+        storage::reset_guardian_cancel_votes(&env, &will_a);
+        storage::reset_guardian_votes(&env, &will_b);
+        storage::reset_guardian_cancel_votes(&env, &will_b);
+
         // Update will_a with merged state
         will_a.beneficiaries = merged_beneficiaries;
         will_a.guardians = merged_guardians;
@@ -2084,6 +2101,7 @@ impl WillContract {
         will_a.balances = combined_balances;
         will_a.balance = combined_balance;
         will_a.guardian_votes = 0;
+        will_a.guardian_cancel_votes = 0;
 
         // Remove old beneficiary indexes for will_b
         for beneficiary in will_b.beneficiaries.iter() {
@@ -2094,9 +2112,16 @@ impl WillContract {
         will_b.balances = Map::new(&env);
         will_b.balance = 0;
         will_b.status = WillStatus::Cancelled;
+        will_b.guardian_votes = 0;
+        will_b.guardian_cancel_votes = 0;
 
         // Decrement active will count since will_b is now cancelled
         storage::decrement_active_will_count(&env);
+
+        // Drop will_b from the owner index now that it is a terminal,
+        // zeroed-out placeholder — otherwise get_wills_by_owner keeps
+        // surfacing it alongside the surviving will_a indefinitely.
+        storage::remove_owner_index(&env, &owner, will_id_b);
 
         // Save both wills
         storage::save_will(&env, &will_a);
@@ -2389,16 +2414,35 @@ impl WillContract {
             panic_with_error!(&env, WillError::AlreadyClaimed);
         }
 
-        let share = will.balance * (hb.percentage as i128) / 100;
-        if share > 0 {
-            token::Client::new(&env, &will.token).transfer(
-                &env.current_contract_address(),
-                &claimant,
-                &share,
-            );
+        // --- COMPUTE: each token's share from the current (pre-mutation) balances,
+        // and the post-claim balances map, in a single pass ---
+        // Mirrors distribute()'s multi-token payout so a hashed beneficiary on
+        // a will holding more than one token is paid its share of every locked
+        // token, not just the primary-token mirror.
+        let mut transfer_plan: Vec<(Address, i128)> = Vec::new(&env);
+        let mut updated_balances: Map<Address, i128> = Map::new(&env);
+        let mut primary_share: i128 = 0;
+        for (token_addr, total) in will.balances.iter() {
+            let share = if total == 0 {
+                0
+            } else {
+                total * (hb.percentage as i128) / 100
+            };
+            if share > 0 {
+                transfer_plan.push_back((token_addr.clone(), share));
+            }
+            if token_addr == will.token {
+                primary_share = share;
+            }
+            updated_balances.set(token_addr, total - share);
         }
 
-        will.balance -= share;
+        // --- EFFECTS: mutate and persist all state before any external call ---
+        will.balances = updated_balances;
+        // `will.balance` mirrors `will.balances[will.token]` for backward
+        // compatibility; keep it in sync so other readers of the legacy field
+        // don't drift from the authoritative multi-token map.
+        will.balance = will.balances.get(will.token.clone()).unwrap_or(0);
 
         // Update the in-memory Vec entry.
         let mut updated_hb: Vec<HashedBeneficiary> = Vec::new(&env);
@@ -2416,7 +2460,19 @@ impl WillContract {
         will.hashed_beneficiaries = updated_hb;
         storage::save_will(&env, &will);
 
-        events::hashed_claimed(&env, will_id, &claimant, share);
+        // --- INTERACTIONS: external token transfers execute after state is settled ---
+        let contract_address = env.current_contract_address();
+        for (token_addr, share) in transfer_plan.iter() {
+            if share > 0 {
+                token::Client::new(&env, &token_addr).transfer(
+                    &contract_address,
+                    &claimant,
+                    &share,
+                );
+            }
+        }
+
+        events::hashed_claimed(&env, will_id, &claimant, primary_share);
     }
 }
 
