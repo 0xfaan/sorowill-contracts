@@ -2617,7 +2617,7 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                 let share = if percentage_index == percentage_count {
                     percentage_remaining
                 } else {
-                    let portion = remaining * (bp as i128) / 10_000;
+                    let portion = proportional_share(remaining, bp);
                     percentage_remaining -= portion;
                     portion
                 };
