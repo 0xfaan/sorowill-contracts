@@ -186,14 +186,31 @@ disambiguate.
 | 10 | `CheckinNotDue` | `trigger_will` was called before the check-in deadline passed. |
 | 11 | `ZeroAmount` | An amount of zero (or less) was supplied where a positive amount is required. |
 | 12 | `TooManyBeneficiaries` | Too many beneficiaries (or guardians) were supplied. |
-| 13 | `WillNotSettled` / `WillNotReleased` / `NotSameOwner` / `InvalidPeriod` | Requires `Released`/`Cancelled` status, or requires `Released` status, or both wills in a merge must share an owner, or a check-in/grace period was zero (or too large to represent) — see calling context. |
-| 14 | `WillNotBothActive` / `DuplicateGuardian` | Both wills in a merge must be `Active`, or the same address appeared more than once in a guardian list. |
-| 15 | `SameWillId` / `GuardianCooldownActive` | The same will id was supplied for both sides of a merge, or the guardian-list cooldown hasn't elapsed yet. |
+| 13 | `WillNotSettled` | The requested action requires the will to be `Released` or `Cancelled`. |
+| 14 | `WillNotBothActive` | Both wills in a merge must be `Active`. |
+| 15 | `SameWillId` | The same will id was supplied for both sides of a merge. |
 | 16 | `MergeWouldExceedLimits` | Merging would exceed the maximum beneficiaries or guardians. |
 | 17 | `OwnerCannotBeGuardian` | The owner cannot designate themselves as a guardian of their own will. |
 | 18 | `BeneficiaryNotFound` | A beneficiary is not found in the will's beneficiary list. |
 | 19 | `KeeperBountyExceedsMax` | Keeper bounty basis points exceed the maximum allowed (100 bps / 1%). |
 | 20 | `InvalidGuardianThreshold` | Guardian threshold is out of range (must be between 1 and `guardians.len()`). |
+| 21 | `FixedAmountExceedsBalance` | The sum of every `Allocation::FixedAmount` beneficiary exceeds the will's balance, or (for a will with no percentage-based beneficiaries) does not exactly account for the whole balance. |
+| 22 | `InvalidPercentage` | A beneficiary percentage is not in the valid range (1..=10000 basis points). |
+| 23 | `WillNotReleased` | The requested action requires the will to be `Released`. |
+| 24 | `NotSameOwner` | Cannot merge: both wills must be owned by the same address. |
+| 25 | `InvalidPeriod` | A check-in or grace period was zero, or long enough that the resulting deadline could not be represented as a ledger timestamp. |
+| 26 | `DuplicateGuardian` | The same address was supplied more than once in a guardian list. |
+| 27 | `GuardianCooldownActive` | The guardian-list cooldown has not yet elapsed; `guardian_trigger` is blocked until the cooldown period passes after the last guardian-list change. |
+| 28 | `InvalidToken` | A supplied token address does not respond to a read-only `decimals()` probe, indicating it is not a valid SEP-41 token. |
+| 29 | `DuplicateBeneficiary` | The same beneficiary address was supplied more than once. |
+| 30 | `WillNotConfirmed` | `confirm_will` was called on a will that is not `PendingConfirmation`. |
+| 31 | `ConfirmationWindowExpired` | `confirm_will` was called after the confirmation deadline elapsed. |
+| 32 | `TooManyIds` | `get_wills` was called with more ids than `MAX_GET_WILLS_IDS`. |
+| 33 | `InsufficientBalance` | `split_will` was asked to split more than the will's current balance. |
+| 34 | `InvalidSplit` | `split_will` was called with an empty beneficiary-to-split list, or a split that would leave the source or new will with an invalid state. |
+| 35 | `InvalidPreimage` | `reveal_and_claim` was called with a pre-image that does not match any stored `HashedBeneficiary` commitment on the will. |
+| 36 | `AlreadyClaimed` | `reveal_and_claim` was called for a hashed beneficiary slot that has already been claimed. |
+| 37 | `TooManyWills` | An owner or beneficiary index list is already at `MAX_WILLS_PER_INDEX` and cannot accept another will id. |
 
 ## Contract spec artifact
 

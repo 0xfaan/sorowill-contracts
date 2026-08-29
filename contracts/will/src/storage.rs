@@ -290,23 +290,27 @@ pub fn index_by_beneficiary(env: &Env, beneficiary: &Address, will_id: u64) {
 /// not in the list, so an address that was never indexed costs a read instead
 /// of a read plus a pointless rewrite.
 ///
+/// Uses order-preserving removal to maintain the monotonic ordering invariant
+/// that `paginate_ids` depends on.
+///
 /// The TTL is refreshed after every write so that an index entry that is only
 /// ever pruned (never freshly added to) does not expire before the underlying
 /// wills do.
 pub fn remove_beneficiary_index(env: &Env, beneficiary: &Address, will_id: u64) {
     let key = DataKey::BeneficiaryWills(beneficiary.clone());
-    let Some(mut ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
+    let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
         return;
     };
-    let Some(index) = ids.first_index_of(will_id) else {
+    let Some(_index) = ids.first_index_of(will_id) else {
         return;
     };
-    // `first_index_of` just proved the index is in bounds.
-    ids.remove_unchecked(index);
-    env.storage().persistent().set(&key, &ids);
-    // Bump TTL so a beneficiary-index entry that is only ever pruned (never
-    // freshly added to) does not expire while its remaining will entries are
-    // still active.
+    let mut new_ids = Vec::new(env);
+    for id in ids.iter() {
+        if id != will_id {
+            new_ids.push_back(id);
+        }
+    }
+    env.storage().persistent().set(&key, &new_ids);
     env.storage()
         .persistent()
         .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
@@ -317,16 +321,24 @@ pub fn remove_beneficiary_index(env: &Env, beneficiary: &Address, will_id: u64) 
 /// Used by `distribute` and `cancel_will` to keep the owner index accurate
 /// after a will reaches a terminal state. Returns without writing when the id
 /// is not in the list.
+///
+/// Uses order-preserving removal to maintain the monotonic ordering invariant
+/// that `paginate_ids` depends on.
 pub fn remove_owner_index(env: &Env, owner: &Address, will_id: u64) {
     let key = DataKey::OwnerWills(owner.clone());
-    let Some(mut ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
+    let Some(ids) = env.storage().persistent().get::<_, Vec<u64>>(&key) else {
         return;
     };
-    let Some(index) = ids.first_index_of(will_id) else {
+    let Some(_index) = ids.first_index_of(will_id) else {
         return;
     };
-    ids.remove_unchecked(index);
-    env.storage().persistent().set(&key, &ids);
+    let mut new_ids = Vec::new(env);
+    for id in ids.iter() {
+        if id != will_id {
+            new_ids.push_back(id);
+        }
+    }
+    env.storage().persistent().set(&key, &new_ids);
     env.storage()
         .persistent()
         .extend_ttl(&key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
@@ -513,6 +525,13 @@ pub fn reset_guardian_cancel_votes(env: &Env, will: &Will) {
 ///
 /// If `cursor` is `Some(id)`, results start *after* that id (exclusive).
 /// `limit` is capped at [`MAX_PAGE_SIZE`].
+///
+/// **ORDERING INVARIANT**: This function assumes the index vector stays
+/// monotonically ordered (ascending). If entries are removed via
+/// `remove_beneficiary_index` or `remove_owner_index`, they MUST use
+/// order-preserving removal. Non-order-preserving removal (e.g. swap-with-last)
+/// breaks the cursor contract, causing entries to be permanently skipped or
+/// duplicated across pages.
 pub fn paginate_ids(env: &Env, ids: &Vec<u64>, cursor: Option<u64>, limit: u32) -> Vec<u64> {
     let page_size = limit.min(MAX_PAGE_SIZE);
     let mut result = Vec::new(env);

@@ -27,8 +27,9 @@
 //! Optionally, up to three guardians may be named on a will; any two of them
 //! calling [`WillContract::guardian_trigger`] force an immediate release,
 //! bypassing the check-in/grace-period flow entirely (e.g. if the owner is
-//! known to be incapacitated). Guardians must first accept their role via
-//! [`WillContract::accept_guardian_role`] before they can vote. Guardian
+//! known to be incapacitated). Guardians are named on the will at creation
+//! time (or via [`WillContract::update_guardians`]) and may vote once the
+//! guardian-list cooldown has elapsed. Guardian
 //! votes expire after a configurable window so stale votes cannot combine
 //! with fresh ones.
 //!
@@ -60,16 +61,6 @@ pub mod fuzz_harness;
 #[cfg(test)]
 mod fuzz_test;
 
-// `mod test;` (test.rs, ~5,800 lines) is deliberately NOT wired in here.
-// It predates the current `Allocation`-based `Beneficiary` schema by two
-// generations (197 uses of the old `percentage`/`basis_points` fields, zero
-// of the current `allocation` field) and large sections of it are also
-// physically corrupted from a bad merge (function bodies cut off mid-statement
-// and spliced with fragments of other functions). It would need a ground-up
-// rewrite, not a fix. Current coverage instead comes from `allocation_test`,
-// `event_test`, `beneficiary_lifecycle_test`, `event_snapshot_test`, and
-// `test_xdr_spec`, all of which already target the current schema.
-
 /// Unit tests for the mixed percentage/fixed-amount `Allocation` model.
 #[cfg(test)]
 mod allocation_test;
@@ -97,21 +88,25 @@ mod event_snapshot_test;
 #[cfg(test)]
 mod test_xdr_spec;
 
-/// Coverage for `get_protocol_stats` (#211).
+/// Regression test for issue #190: ensure `distribute()` uses the overflow-safe
+/// `proportional_share` helper for beneficiary-payout calculations.
 #[cfg(test)]
-mod protocol_stats_test;
+mod distribute_overflow_safety_test;
 
-/// Coverage for `get_triggered_wills` (#212).
+/// Regression test for issue #187: ensure `merge_wills` decrements the active
+/// will count when marking the merged will as cancelled.
 #[cfg(test)]
-mod triggered_wills_test;
+mod merge_active_count_test;
 
-/// Coverage for `get_wills_by_owner_and_status` (#213).
+/// Regression test for issue #188: ensure `merge_beneficiaries` does not silently
+/// drop a beneficiary whose merged share rounds down to 0 basis points.
 #[cfg(test)]
-mod wills_by_owner_status_test;
+mod merge_rounding_test;
 
-/// Coverage for `get_wills` (#214).
+/// Regression test for issue #189: ensure `merge_wills` preserves `Allocation::FixedAmount`
+/// beneficiaries' fixed-amount semantics instead of converting to `Allocation::Percentage`.
 #[cfg(test)]
-mod get_wills_test;
+mod merge_fixed_amount_test;
 
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
@@ -337,6 +332,7 @@ impl WillContract {
             guardian_structs.push_back(Guardian {
                 address: addr,
                 weight: 1,
+                consent: GuardianConsent::Pending,
             });
         }
 
@@ -425,6 +421,11 @@ impl WillContract {
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
         storage::increment_active_will_count(&env);
+
+        // Increment locked value for each token in this will
+        for (token_addr, amount) in tokens.iter() {
+            storage::adjust_locked_value(&env, &token_addr, amount);
+        }
 
         record_transition(
             &env,
@@ -663,14 +664,6 @@ impl WillContract {
     /// Distributes all token balances to beneficiaries proportionally to
     /// their configured percentages. Callable by anyone once the grace
     /// period has fully elapsed.
-    ///
-    /// If a vesting schedule is configured, instead of releasing everything
-    /// at once, this transitions the will to `Vesting` status and records
-    /// the start time. Beneficiaries then call `claim_vested` to unlock
-    /// their share gradually.
-    ///
-    /// If no vesting schedule is configured, behaves exactly as before:
-    /// full lump-sum release.
     ///
     /// In push mode (the default), tokens are transferred directly to each
     /// beneficiary. In pull mode (`pull_distribution = true`), shares are
@@ -992,6 +985,10 @@ impl WillContract {
         // Update indexes: remove the renouncing beneficiary from the reverse index
         storage::remove_beneficiary_index(&env, &beneficiary, will_id);
 
+        // Validate the redistributed beneficiary allocations
+        let will_balance = total_balance(&will.balances);
+        assert_valid_allocations(&env, &will.beneficiaries, will_balance);
+
         // Get the owner for event emission (not changed)
         let owner = will.owner.clone();
         storage::save_will(&env, &will);
@@ -1028,6 +1025,7 @@ impl WillContract {
             guardian_structs.push_back(Guardian {
                 address: addr,
                 weight: 1,
+                consent: GuardianConsent::Pending,
             });
         }
         will.guardians = guardian_structs;
@@ -1166,6 +1164,7 @@ impl WillContract {
                 guardian_structs.push_back(Guardian {
                     address: addr,
                     weight: 1,
+                    consent: GuardianConsent::Pending,
                 });
             }
             will.guardians = guardian_structs;
@@ -1228,6 +1227,9 @@ impl WillContract {
         will.balances.set(token.clone(), new_balance);
         storage::save_will(&env, &will);
 
+        // Increment locked value for this token
+        storage::adjust_locked_value(&env, &token, amount);
+
         // --- INTERACTIONS: external token transfer after state is committed ---
         token::Client::new(&env, &token).transfer(
             &owner,
@@ -1252,14 +1254,13 @@ impl WillContract {
         load_will(&env, will_id)
     }
 
-    /// Returns just the lifecycle status of `will_id`, without loading or
-    /// transmitting the rest of the `Will` struct (beneficiaries, guardians,
-    /// balances, etc.).
+    /// Returns just the lifecycle status of `will_id`.
     ///
-    /// Intended for polling use cases — e.g. a dashboard checking the status
-    /// of many wills — where the caller only needs the status and calling
-    /// [`Self::get_will`] would mean deserializing and transmitting data it
-    /// throws away.
+    /// Note: This function still loads the full `Will` struct from persistent
+    /// storage and deserializes it. The dominant cost is the storage read and
+    /// deserialization, not the return-value encoding. Use this method instead
+    /// of [`Self::get_will`] only when you need the status and do not require
+    /// other will fields.
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if no will exists with this id.
@@ -1275,8 +1276,8 @@ impl WillContract {
     ///   (`last_checkin + checkin_period_days`).
     /// - `Triggered`: seconds until the grace period expires
     ///   (`trigger_time + grace_period_days`).
-    /// - `Released`, `Cancelled`, `Settled`: no deadline applies; returns
-    ///   `None`.
+    /// - `PendingConfirmation`, `Released`, `Cancelled`, `Settled`: no deadline
+    ///   applies; returns `None`.
     ///
     /// The returned value is negative when the deadline has already passed
     /// (e.g. an `Active` will whose check-in deadline elapsed but which has
@@ -1285,8 +1286,11 @@ impl WillContract {
     /// treat any non-positive value as "actionable now" rather than treating
     /// only `None` as the past-due signal.
     ///
-    /// Like [`Self::get_will_status`], this avoids loading and transmitting
-    /// the full `Will` struct for simple polling use cases.
+    /// Note: This function still loads the full `Will` struct from persistent
+    /// storage and deserializes it. The dominant cost is the storage read and
+    /// deserialization, not the return-value encoding. Use this method instead
+    /// of [`Self::get_will`] only when you need the deadline and do not require
+    /// other will fields.
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if no will exists with this id.
@@ -1356,15 +1360,29 @@ impl WillContract {
         wills
     }
 
-    /// Returns the full state of every will owned by `owner` with the given `status`.
+    /// Returns a page of wills owned by `owner` with the given `status`.
+    ///
+    /// Supports bounded pagination to avoid hitting Soroban resource limits
+    /// for addresses with many wills.
+    ///
+    /// # Parameters
+    /// - `owner`: the address to query wills for.
+    /// - `status`: the will status to filter by.
+    /// - `cursor`: optional will id to paginate after (exclusive). Pass `None`
+    ///   or `0` for the first page.
+    /// - `limit`: maximum number of wills to return. Capped at
+    ///   [`storage::MAX_PAGE_SIZE`].
     pub fn get_wills_by_owner_and_status(
         env: Env,
         owner: Address,
         status: WillStatus,
+        cursor: Option<u64>,
+        limit: u32,
     ) -> Vec<Will> {
         let ids = storage::get_owner_wills(&env, &owner);
+        let page = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in ids.iter() {
+        for id in page.iter() {
             let will = match storage::load_will(&env, id) {
                 Ok(w) => w,
                 Err(e) => panic_with_error!(&env, e),
@@ -1376,11 +1394,23 @@ impl WillContract {
         wills
     }
 
-    /// Returns every will `beneficiary` is named in.
-    pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address) -> Vec<Will> {
+    /// Returns wills `beneficiary` is named in, with optional pagination.
+    ///
+    /// # Parameters
+    /// - `beneficiary`: the address to query for
+    /// - `cursor`: optional will id to start pagination after (exclusive)
+    /// - `limit`: maximum number of wills to return (capped at MAX_PAGE_SIZE)
+    ///
+    /// # Pagination
+    /// To fetch all wills in pages:
+    /// 1. Call with `cursor=None, limit=N`
+    /// 2. If result has N wills, call again with `cursor=last_will_id`
+    /// 3. Repeat until result has fewer than N wills
+    pub fn get_wills_by_beneficiary(env: Env, beneficiary: Address, cursor: Option<u64>, limit: u32) -> Vec<Will> {
         let ids = storage::get_beneficiary_wills(&env, &beneficiary);
+        let paginated_ids = storage::paginate_ids(&env, &ids, cursor, limit);
         let mut wills = Vec::new(&env);
-        for id in ids.iter() {
+        for id in paginated_ids.iter() {
             wills.push_back(match storage::load_will(&env, id) {
                 Ok(will) => will,
                 Err(e) => panic_with_error!(&env, e),
@@ -1468,7 +1498,12 @@ impl WillContract {
         }
 
         let weight = match will.guardians.iter().find(|g| g.address == guardian) {
-            Some(g) => g.weight,
+            Some(g) => {
+                if g.consent != GuardianConsent::Accepted {
+                    panic_with_error!(&env, WillError::GuardianNotConsented);
+                }
+                g.weight
+            }
             None => panic_with_error!(&env, WillError::NotGuardian),
         };
 
@@ -1538,7 +1573,12 @@ impl WillContract {
 
         // Verify the caller is a named guardian and capture their weight.
         let weight = match will.guardians.iter().find(|g| g.address == guardian) {
-            Some(g) => g.weight,
+            Some(g) => {
+                if g.consent != GuardianConsent::Accepted {
+                    panic_with_error!(&env, WillError::GuardianNotConsented);
+                }
+                g.weight
+            }
             None => panic_with_error!(&env, WillError::NotGuardian),
         };
 
@@ -1585,6 +1625,86 @@ impl WillContract {
             let next_deadline = now + will.checkin_period_days * SECONDS_PER_DAY;
             events::guardian_cancelled_trigger(&env, will_id, &guardian, next_deadline);
         }
+    }
+
+    /// Allows a named guardian to accept their role on a will.
+    ///
+    /// A guardian must call this to explicitly accept their role before they can
+    /// vote via [`guardian_trigger`]. This ensures guardians actively consent
+    /// before they can force an early release of funds.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to accept guardianship for
+    /// - `guardian`: the guardian address accepting the role; must authorize
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotGuardian`] if `guardian` is not named on this will.
+    pub fn accept_guardian_role(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        let mut found = false;
+        let mut updated_guardians: Vec<Guardian> = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if g.address == guardian {
+                updated_guardians.push_back(Guardian {
+                    address: g.address.clone(),
+                    weight: g.weight,
+                    consent: GuardianConsent::Accepted,
+                });
+                found = true;
+            } else {
+                updated_guardians.push_back(g.clone());
+            }
+        }
+
+        if !found {
+            panic_with_error!(&env, WillError::NotGuardian);
+        }
+
+        will.guardians = updated_guardians;
+        storage::save_will(&env, &will);
+    }
+
+    /// Allows a named guardian to reject their role on a will.
+    ///
+    /// A guardian can reject their role to prevent themselves from voting via
+    /// [`guardian_trigger`]. Once rejected, the guardian cannot vote unless
+    /// explicitly re-added to the guardian list.
+    ///
+    /// # Parameters
+    /// - `will_id`: the will to reject guardianship for
+    /// - `guardian`: the guardian address rejecting the role; must authorize
+    ///
+    /// # Panics
+    /// - [`WillError::WillNotFound`] if the will does not exist.
+    /// - [`WillError::NotGuardian`] if `guardian` is not named on this will.
+    pub fn reject_guardian_role(env: Env, will_id: u64, guardian: Address) {
+        guardian.require_auth();
+        let mut will = load_will(&env, will_id);
+
+        let mut found = false;
+        let mut updated_guardians: Vec<Guardian> = Vec::new(&env);
+        for g in will.guardians.iter() {
+            if g.address == guardian {
+                updated_guardians.push_back(Guardian {
+                    address: g.address.clone(),
+                    weight: g.weight,
+                    consent: GuardianConsent::Rejected,
+                });
+                found = true;
+            } else {
+                updated_guardians.push_back(g.clone());
+            }
+        }
+
+        if !found {
+            panic_with_error!(&env, WillError::NotGuardian);
+        }
+
+        will.guardians = updated_guardians;
+        storage::save_will(&env, &will);
     }
 
     // ── #21: Will cloning / templates ────────────────────────────────────
@@ -1681,6 +1801,7 @@ impl WillContract {
         };
         storage::save_will(&env, &will);
         storage::index_by_owner(&env, &owner, will_id);
+        storage::increment_active_will_count(&env);
 
         events::will_created(
             &env,
@@ -1784,6 +1905,7 @@ impl WillContract {
                 guardian_structs.push_back(Guardian {
                     address: addr,
                     weight: 1,
+                    consent: GuardianConsent::Pending,
                 });
             }
 
@@ -1825,6 +1947,7 @@ impl WillContract {
             };
             storage::save_will(&env, &will);
             storage::index_by_owner(&env, &owner, will_id);
+            storage::increment_active_will_count(&env);
 
             events::will_created(
                 &env,
@@ -1971,6 +2094,9 @@ impl WillContract {
         will_b.balances = Map::new(&env);
         will_b.balance = 0;
         will_b.status = WillStatus::Cancelled;
+
+        // Decrement active will count since will_b is now cancelled
+        storage::decrement_active_will_count(&env);
 
         // Save both wills
         storage::save_will(&env, &will_a);
@@ -2633,7 +2759,7 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
                 let share = if percentage_index == percentage_count {
                     percentage_remaining
                 } else {
-                    let portion = remaining * (bp as i128) / 10_000;
+                    let portion = proportional_share(remaining, bp);
                     percentage_remaining -= portion;
                     portion
                 };
@@ -2685,10 +2811,12 @@ fn distribute(env: &Env, will: &mut Will, keeper: &Option<Address>) {
 
 /// Merges beneficiaries from two wills, recalculating percentages proportionally
 /// based on the combined balance. If a beneficiary appears in both wills, their
-/// percentages are summed before recalculation.
+/// percentages are summed before recalculation. Preserves `FixedAmount` allocation
+/// types where applicable.
 fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficiary> {
     let total_balance = will_a.balance + will_b.balance;
     let mut beneficiary_shares: Vec<(Address, i128)> = Vec::new(env);
+    let mut beneficiary_allocations: Vec<(Address, Allocation)> = Vec::new(env);
 
     for (beneficiaries, will_balance) in [
         (&will_a.beneficiaries, will_a.balance),
@@ -2701,6 +2829,7 @@ fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficia
             };
             let mut found = false;
             let mut updated_shares: Vec<(Address, i128)> = Vec::new(env);
+            let mut updated_allocations: Vec<(Address, Allocation)> = Vec::new(env);
             for (addr, existing_share) in beneficiary_shares.iter() {
                 if addr == beneficiary.address {
                     updated_shares.push_back((addr, existing_share + share));
@@ -2709,50 +2838,117 @@ fn merge_beneficiaries(env: &Env, will_a: &Will, will_b: &Will) -> Vec<Beneficia
                     updated_shares.push_back((addr, existing_share));
                 }
             }
+            // Track original allocation type: prefer FixedAmount if either will has it
+            for (addr, existing_alloc) in beneficiary_allocations.iter() {
+                if addr == beneficiary.address {
+                    // If either the existing or new allocation is FixedAmount, preserve it
+                    let merged_alloc = match (existing_alloc, beneficiary.allocation) {
+                        (Allocation::FixedAmount(amt_a), Allocation::FixedAmount(amt_b)) => {
+                            Allocation::FixedAmount(amt_a + amt_b)
+                        },
+                        (Allocation::FixedAmount(amt), _) => Allocation::FixedAmount(amt),
+                        (_, Allocation::FixedAmount(amt)) => Allocation::FixedAmount(amt),
+                        (Allocation::Percentage(_), Allocation::Percentage(_)) => {
+                            existing_alloc.clone()
+                        },
+                    };
+                    updated_allocations.push_back((addr, merged_alloc));
+                } else {
+                    updated_allocations.push_back((addr, existing_alloc.clone()));
+                }
+            }
             if found {
                 beneficiary_shares = updated_shares;
+                beneficiary_allocations = updated_allocations;
             } else {
                 beneficiary_shares.push_back((beneficiary.address.clone(), share));
+                beneficiary_allocations.push_back((beneficiary.address.clone(), beneficiary.allocation));
             }
         }
     }
 
     // Recalculate basis-point percentages from combined shares.
+    // Ensure no beneficiary with a non-zero share is silently dropped due to rounding.
+    // Preserve FixedAmount allocations where applicable.
     let mut merged_beneficiaries: Vec<Beneficiary> = Vec::new(env);
     let mut total_bp: u32 = 0;
+    let mut total_fixed: i128 = 0;
     let count = beneficiary_shares.len();
 
     for (i, (addr, share)) in beneficiary_shares.iter().enumerate() {
-        let bp = if total_balance > 0 {
-            ((share * 10_000) / total_balance) as u32
-        } else {
-            0
+        // Find the original allocation type for this beneficiary
+        let original_allocation = beneficiary_allocations.iter()
+            .find(|(a, _)| a == addr)
+            .map(|(_, alloc)| alloc);
+
+        let allocation = match original_allocation {
+            Some(Allocation::FixedAmount(amt)) => {
+                total_fixed += amt;
+                Allocation::FixedAmount(amt)
+            },
+            _ => {
+                // Convert to percentage for non-fixed-amount beneficiaries
+                let bp = if total_balance > 0 {
+                    ((share * 10_000) / total_balance) as u32
+                } else {
+                    0
+                };
+
+                // Include all beneficiaries: those with bp > 0, or those with share > 0 but bp = 0
+                // (they get 1 bp to prevent silent dropping), or the last one (for remainder).
+                if bp > 0 || (share > 0 && bp == 0) || (i as u32) == count - 1 {
+                    let final_bp = if bp > 0 { bp } else if share > 0 { 1 } else { 0 };
+                    if final_bp > 0 {
+                        total_bp += final_bp;
+                    }
+                    Allocation::Percentage(final_bp)
+                } else {
+                    continue;
+                }
+            },
         };
-        if bp > 0 || (i as u32) == count - 1 {
-            merged_beneficiaries.push_back(Beneficiary {
-                address: addr,
-                allocation: Allocation::Percentage(bp),
-            });
-            total_bp += bp;
-        }
+
+        merged_beneficiaries.push_back(Beneficiary {
+            address: addr,
+            allocation,
+        });
     }
 
-    // Handle rounding: assign remainder to the last beneficiary.
+    // Handle rounding: assign remainder to the last percentage-based beneficiary
+    // to reach exactly 10,000 bp. FixedAmount beneficiaries keep their exact amounts.
     if total_bp < 10_000 && !merged_beneficiaries.is_empty() {
         let remainder = 10_000 - total_bp;
-        let last_index = merged_beneficiaries.len() - 1;
-        let last_beneficiary = merged_beneficiaries.get(last_index).unwrap();
-        let new_bp = match last_beneficiary.allocation {
-            Allocation::Percentage(bp) => bp + remainder,
-            Allocation::FixedAmount(_) => remainder,
-        };
-        merged_beneficiaries.set(
-            last_index,
-            Beneficiary {
-                address: last_beneficiary.address,
-                allocation: Allocation::Percentage(new_bp),
-            },
-        );
+        // Find the last percentage-based beneficiary to assign the remainder
+        for i in (0..merged_beneficiaries.len()).rev() {
+            let beneficiary = merged_beneficiaries.get(i).unwrap();
+            if let Allocation::Percentage(bp) = beneficiary.allocation {
+                merged_beneficiaries.set(
+                    i,
+                    Beneficiary {
+                        address: beneficiary.address,
+                        allocation: Allocation::Percentage(bp + remainder),
+                    },
+                );
+                break;
+            }
+        }
+    } else if total_bp > 10_000 && !merged_beneficiaries.is_empty() {
+        // If we exceeded 10_000 due to giving everyone at least 1 bp, reduce the last percentage beneficiary
+        let excess = total_bp - 10_000;
+        for i in (0..merged_beneficiaries.len()).rev() {
+            let beneficiary = merged_beneficiaries.get(i).unwrap();
+            if let Allocation::Percentage(bp) = beneficiary.allocation {
+                let new_bp = if bp > excess { bp - excess } else { 1 };
+                merged_beneficiaries.set(
+                    i,
+                    Beneficiary {
+                        address: beneficiary.address,
+                        allocation: Allocation::Percentage(new_bp),
+                    },
+                );
+                break;
+            }
+        }
     }
 
     merged_beneficiaries
