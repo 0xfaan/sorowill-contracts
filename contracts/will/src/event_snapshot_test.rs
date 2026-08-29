@@ -412,14 +412,29 @@ fn test_remaining_events_snapshot() {
     let surviving_will_id = 12345u64;
     let consumed_will_id = 67890u64;
     let new_balance = 10_000_000_i128;
-    
+    let merged_beneficiaries = vec![
+        &env,
+        Beneficiary {
+            address: owner.clone(),
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
+
     env.as_contract(&contract_id, || {
-        events::wills_merged(&env, surviving_will_id, consumed_will_id, &owner, new_balance);
+        events::wills_merged(
+            &env,
+            surviving_will_id,
+            consumed_will_id,
+            &owner,
+            new_balance,
+            &merged_beneficiaries,
+        );
     });
-    
+
     let event_data = find_event_by_topic(&env, symbol_short!("merged"), Some(surviving_will_id))
         .expect("wills_merged event not found");
-    let data: (Address, u64, i128) = event_data.try_into_val(&env).unwrap();
+    let data: (Address, u64, i128, soroban_sdk::Vec<Beneficiary>) =
+        event_data.try_into_val(&env).unwrap();
     assert_eq!(data.0, owner, "merged event owner mismatch");
     assert_eq!(data.1, consumed_will_id, "merged event consumed_will_id mismatch");
     assert_eq!(data.2, new_balance, "merged event new_balance mismatch");
@@ -518,13 +533,27 @@ fn test_final_events_snapshot() {
     // beneficiary_renounced event
     let will_id = 55555u64;
     let beneficiary = Address::generate(&env);
+    let redistributed_beneficiaries = vec![
+        &env,
+        Beneficiary {
+            address: owner.clone(),
+            allocation: Allocation::Percentage(10_000),
+        },
+    ];
     env.as_contract(&contract_id, || {
-        events::beneficiary_renounced(&env, will_id, &beneficiary, &owner);
+        events::beneficiary_renounced(
+            &env,
+            will_id,
+            &beneficiary,
+            &owner,
+            &redistributed_beneficiaries,
+        );
     });
-    
+
     let event_data = find_event_by_topic(&env, symbol_short!("renounce"), Some(will_id))
         .expect("beneficiary_renounced event not found");
-    let data: (Address, Address) = event_data.try_into_val(&env).unwrap();
+    let data: (Address, Address, soroban_sdk::Vec<Beneficiary>) =
+        event_data.try_into_val(&env).unwrap();
     assert_eq!(data.0, beneficiary, "renounced event beneficiary mismatch");
     assert_eq!(data.1, owner, "renounced event owner mismatch");
     
