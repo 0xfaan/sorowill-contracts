@@ -84,6 +84,10 @@ mod test_support;
 #[cfg(test)]
 mod event_snapshot_test;
 
+/// Regression coverage for triggered-will lifecycle bookkeeping.
+#[cfg(test)]
+mod triggered_wills_test;
+
 /// XDR spec fixture test for `create_will` encoding stability (#4).
 #[cfg(test)]
 mod test_xdr_spec;
