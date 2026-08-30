@@ -31,22 +31,18 @@ pub struct Beneficiary {
     pub allocation: Allocation,
 }
 
-/// Whether a named guardian has explicitly accepted or rejected their role.
+/// Consent status for a named guardian.
 ///
-/// Guardians start as `Pending` when added to a will (either at creation or
-/// via `update_guardians` / `update_will_settings`). They must call
-/// `accept_guardian_role` to move to `Accepted` before they can vote via
-/// `guardian_trigger` or `guardian_cancel_trigger`. Calling
-/// `reject_guardian_role` moves them to `Rejected` and permanently prevents
-/// voting unless the guardian is removed and re-added to the list.
+/// A guardian must explicitly accept before they can cast a `guardian_trigger`
+/// vote. The owner may also reject a guardian's acceptance.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuardianConsent {
-    /// The guardian has not yet responded to their role invitation.
+    /// Guardian has been named but has not yet responded.
     Pending,
-    /// The guardian has explicitly accepted their role and may vote.
+    /// Guardian has accepted the role and may vote.
     Accepted,
-    /// The guardian has explicitly rejected their role and may not vote.
+    /// Guardian has declined the role.
     Rejected,
 }
 
@@ -170,6 +166,9 @@ pub struct Will {
     /// When `true`, transfers use `env.transfer()` instead of the token client.
     pub is_native: bool,
     /// The amount of `token` currently locked in the will, in the token's base units.
+    /// A legacy mirror of `balances[token]` kept for backward compatibility;
+    /// every writer that touches the primary token's balance must update both
+    /// fields together until this mirror is fully removed.
     pub balance: i128,
     /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
