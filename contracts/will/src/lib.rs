@@ -74,6 +74,15 @@ mod event_test;
 #[cfg(test)]
 mod beneficiary_lifecycle_test;
 
+/// Cursor- and limit-based pagination regression tests for owner and
+/// beneficiary lookups.
+#[cfg(test)]
+mod pagination_test;
+
+/// Regression tests for paginated owner-status queries and related edge cases.
+#[cfg(test)]
+mod regression_test;
+
 /// Malicious/reentrant SEP-41 token mock used for reentrancy regression
 /// testing. See the module docs for details.
 #[cfg(test)]
@@ -83,6 +92,14 @@ mod test_support;
 /// per-token breakdowns (see event_snapshot_test module docs).
 #[cfg(test)]
 mod event_snapshot_test;
+
+/// Regression coverage for triggered-will lifecycle bookkeeping.
+#[cfg(test)]
+mod triggered_wills_test;
+
+/// Guarded-release and cooldown regression tests for guardian voting.
+#[cfg(test)]
+mod guardian_cancel_test;
 
 /// XDR spec fixture test for `create_will` encoding stability (#4).
 #[cfg(test)]
