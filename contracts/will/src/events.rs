@@ -184,16 +184,27 @@ pub fn guardian_cancelled_trigger(
 }
 
 /// Published when two wills are merged into one.
+///
+/// `beneficiaries` is the surviving will's full post-merge beneficiary list
+/// (address + allocation pairs, already proportionally recalculated), so an
+/// off-chain indexer can reconstruct the new split directly from this event
+/// without a follow-up `get_will` call. Bounded by `MAX_BENEFICIARIES`.
 pub fn wills_merged(
     env: &Env,
     surviving_will_id: u64,
     consumed_will_id: u64,
     owner: &Address,
     new_balance: i128,
+    beneficiaries: &Vec<Beneficiary>,
 ) {
     env.events().publish(
         (symbol_short!("merged"), surviving_will_id),
-        (owner.clone(), consumed_will_id, new_balance),
+        (
+            owner.clone(),
+            consumed_will_id,
+            new_balance,
+            beneficiaries.clone(),
+        ),
     );
 }
 
@@ -246,10 +257,21 @@ pub fn periods_updated(
 }
 
 /// Published when a beneficiary renounces their inheritance share.
-pub fn beneficiary_renounced(env: &Env, will_id: u64, beneficiary: &Address, owner: &Address) {
+///
+/// `beneficiaries` is the will's full post-renunciation beneficiary list
+/// (address + allocation pairs, already redistributed), so an off-chain
+/// indexer can reconstruct the new split directly from this event without a
+/// follow-up `get_will` call. Bounded by `MAX_BENEFICIARIES`.
+pub fn beneficiary_renounced(
+    env: &Env,
+    will_id: u64,
+    beneficiary: &Address,
+    owner: &Address,
+    beneficiaries: &Vec<Beneficiary>,
+) {
     env.events().publish(
         (symbol_short!("renounce"), will_id),
-        (beneficiary.clone(), owner.clone()),
+        (beneficiary.clone(), owner.clone(), beneficiaries.clone()),
     );
 }
 

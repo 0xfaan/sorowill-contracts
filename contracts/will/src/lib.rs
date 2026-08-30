@@ -993,7 +993,7 @@ impl WillContract {
         let owner = will.owner.clone();
         storage::save_will(&env, &will);
 
-        events::beneficiary_renounced(&env, will_id, &beneficiary, &owner);
+        events::beneficiary_renounced(&env, will_id, &beneficiary, &owner, &will.beneficiaries);
     }
 
     /// Replaces the guardian list for `will_id`. Only possible while the will
@@ -1305,6 +1305,13 @@ impl WillContract {
                 Some(deadline - now)
             }
             WillStatus::Triggered => {
+                // `trigger_will` is the only path that sets `WillStatus::Triggered`,
+                // and it always sets `trigger_time` to `Some(now)` in the same
+                // write. `trigger_time` should therefore never be `None` here;
+                // the `unwrap_or` exists only as a defensive fallback in case a
+                // future entry point ever saves a `Triggered` will without it,
+                // in which case it deliberately degrades to `last_checkin`
+                // (understating the elapsed grace period) rather than panicking.
                 let trigger_time = will.trigger_time.unwrap_or(will.last_checkin) as i64;
                 let deadline = trigger_time + (will.grace_period_days * SECONDS_PER_DAY) as i64;
                 Some(deadline - now)
@@ -2107,7 +2114,14 @@ impl WillContract {
             storage::index_by_beneficiary(&env, &beneficiary.address, will_id_a);
         }
 
-        events::wills_merged(&env, will_id_a, will_id_b, &owner, combined_balance);
+        events::wills_merged(
+            &env,
+            will_id_a,
+            will_id_b,
+            &owner,
+            combined_balance,
+            &will_a.beneficiaries,
+        );
     }
 
     /// Returns the full audit trail for `will_id`, recording every status
