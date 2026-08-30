@@ -108,6 +108,12 @@ mod merge_rounding_test;
 #[cfg(test)]
 mod merge_fixed_amount_test;
 
+/// Tests for the `update_guardians` / `update_will_settings` threshold-safety
+/// check: a new guardian list that would leave `guardian_threshold` unreachable
+/// must be rejected with `InvalidGuardianThreshold`.
+#[cfg(test)]
+mod update_guardians_threshold_test;
+
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, symbol_short, token, Address, Bytes, Env, Map, Vec,
 };
@@ -1037,12 +1043,28 @@ impl WillContract {
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
     /// - [`WillError::TooManyBeneficiaries`] if more than `MAX_GUARDIANS`
     ///   guardians are supplied.
+    /// - [`WillError::InvalidGuardianThreshold`] if the new guardian list is
+    ///   non-empty and the will's current `guardian_threshold` exceeds the new
+    ///   list length (i.e. the threshold would become permanently unreachable).
+    ///   The owner must update the threshold via `update_guardian_threshold`
+    ///   before or after shrinking the guardian list to an appropriate size.
     pub fn update_guardians(env: Env, will_id: u64, owner: Address, guardians: Vec<Address>) {
         owner.require_auth();
         let mut will = load_owned(&env, will_id, &owner);
         assert_status(&env, &will, WillStatus::Active, WillError::WillNotActive);
 
         assert_valid_guardians(&env, &owner, &guardians);
+
+        // Reject any update that would leave the existing threshold unreachable.
+        // An empty guardian list disables the guardian mechanism entirely, so
+        // threshold is irrelevant there. For a non-empty list the threshold must
+        // remain in 1..=new_len — the same invariant enforced at create_will time.
+        if !guardians.is_empty() {
+            let new_len = guardians.len();
+            if will.guardian_threshold > new_len {
+                panic_with_error!(&env, WillError::InvalidGuardianThreshold);
+            }
+        }
 
         let now = env.ledger().timestamp();
         storage::reset_guardian_votes(&env, &will);
@@ -1139,6 +1161,18 @@ impl WillContract {
     /// - `checkin_period_days`: new check-in period (optional)
     /// - `grace_period_days`: new grace period (optional)
     ///
+    /// # Events
+    /// Always emits [`events::will_settings_updated`] with an `updated_fields`
+    /// `Vec<Symbol>` listing every field that changed (`"benef"`, `"guard"`,
+    /// `"checkin"`, `"grace"`). This is the canonical way to detect which settings
+    /// were modified in a single call.
+    ///
+    /// When `guardians` is `Some(…)`, this function **also** emits
+    /// [`events::guardians_updated`] (topic `"guardup"`) so that off-chain consumers
+    /// subscribed to that topic are notified consistently regardless of whether the
+    /// guardian change was made through [`Self::update_guardians`] or through this
+    /// composite entry point.
+    ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
     /// - [`WillError::WillNotActive`] if the will is not `Active`.
@@ -1182,10 +1216,18 @@ impl WillContract {
         }
 
         // Update guardians if provided
-        if let Some(new_guardians) = guardians {
+        let guardians_changed = if let Some(new_guardians) = guardians {
             assert_valid_guardians(&env, &owner, &new_guardians);
+
+            // Same threshold invariant enforced in update_guardians: a non-empty
+            // new list must not leave the existing guardian_threshold unreachable.
+            if !new_guardians.is_empty() && will.guardian_threshold > new_guardians.len() {
+                panic_with_error!(&env, WillError::InvalidGuardianThreshold);
+            }
+
             let now = env.ledger().timestamp();
             storage::reset_guardian_votes(&env, &will);
+            storage::reset_guardian_cancel_votes(&env, &will);
             let mut guardian_structs: Vec<Guardian> = Vec::new(&env);
             for addr in new_guardians.iter() {
                 guardian_structs.push_back(Guardian {
@@ -1196,10 +1238,15 @@ impl WillContract {
             }
             will.guardians = guardian_structs;
             will.guardian_votes = 0;
-            will.guardian_list_updated_at = now;
             will.guardian_vote_weight = 0;
+            will.guardian_cancel_votes = 0;
+            will.guardian_cancel_vote_weight = 0;
+            will.guardian_list_updated_at = now;
             updated_fields.push_back(symbol_short!("guard"));
-        }
+            true
+        } else {
+            false
+        };
 
         // Update checkin period if provided
         if let Some(new_checkin) = checkin_period_days {
@@ -1224,8 +1271,18 @@ impl WillContract {
         // Save the will with all updates applied
         storage::save_will(&env, &will);
 
-        // Emit consolidated event with the list of updated fields
+        // Emit the consolidated settings event so consumers can inspect which
+        // fields changed in a single subscription.
         events::will_settings_updated(&env, will_id, &owner, &updated_fields);
+
+        // Also emit the dedicated `guardians_updated` event so that off-chain
+        // consumers subscribed to that topic (e.g. to invalidate cached guardian
+        // consent state) receive the notification consistently, regardless of
+        // whether the guardian change was made through `update_guardians` or
+        // through this composite entry point.
+        if guardians_changed {
+            events::guardians_updated(&env, will_id, &owner);
+        }
     }
 
     /// Adds `amount` of a specific `token` to an existing will's locked
@@ -1415,6 +1472,7 @@ impl WillContract {
     /// - `limit`: maximum number of wills to return. Capped at
     ///   [`storage::MAX_PAGE_SIZE`].
     pub fn get_wills_by_owner_and_status(
+
         env: Env,
         owner: Address,
         status: WillStatus,
@@ -1477,6 +1535,12 @@ impl WillContract {
     /// not map to a stored will is silently skipped (no panic). The result
     /// preserves the input order, minus the missing ids.
     ///
+    /// **Duplicate ids are not deduplicated.** If the same id appears more
+    /// than once in `ids`, the corresponding `Will` struct is returned once
+    /// per occurrence. Callers performing client-side aggregation (e.g.
+    /// summing balances across the returned batch) must deduplicate the input
+    /// ids themselves to avoid double-counting.
+    ///
     /// **Skipping vs. panicking:** the owner/beneficiary index functions
     /// (`get_wills_by_owner`, `get_wills_by_beneficiary`) also skip missing
     /// ids for the same reason — stale index entries can arise after a will
@@ -1494,6 +1558,12 @@ impl WillContract {
     ///
     /// // Only the two real wills are returned; 9999 is silently skipped.
     /// assert_eq!(wills.len(), 2);
+    ///
+    /// // Passing the same id twice yields two copies of the same Will.
+    /// let dupes = client.get_wills(&vec![&env, will_id_a, will_id_a]);
+    /// assert_eq!(dupes.len(), 2);
+    /// assert_eq!(dupes.get(0).unwrap().id, will_id_a);
+    /// assert_eq!(dupes.get(1).unwrap().id, will_id_a);
     /// ```
     pub fn get_wills(env: Env, ids: Vec<u64>) -> Vec<Will> {
         if ids.len() > MAX_GET_WILLS_IDS {
