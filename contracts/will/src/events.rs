@@ -6,7 +6,7 @@
 
 use soroban_sdk::{symbol_short, Address, Env, Symbol, Vec};
 
-use crate::types::Beneficiary;
+use crate::types::{Beneficiary, Guardian};
 
 /// Published when a new will is created.
 ///
@@ -121,9 +121,15 @@ pub fn beneficiaries_updated(
 }
 
 /// Published when the owner updates the guardian list.
-pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address) {
-    env.events()
-        .publish((symbol_short!("guardup"), will_id), owner.clone());
+///
+/// `guardians` is the full new guardian list (address + weight pairs), so
+/// off-chain indexers can learn the new set without a follow-up `get_will`
+/// call, mirroring [`beneficiaries_updated`].
+pub fn guardians_updated(env: &Env, will_id: u64, owner: &Address, guardians: &Vec<Guardian>) {
+    env.events().publish(
+        (symbol_short!("guardup"), will_id),
+        (owner.clone(), guardians.clone()),
+    );
 }
 
 /// Published when the owner closes a Released will, marking it Settled.
@@ -292,6 +298,11 @@ pub fn keeper_bounty_paid(env: &Env, will_id: u64, keeper: &Address, amount: i12
 }
 
 /// Published when a will is split into two independent wills (issue #45).
+///
+/// `split_amount` is the amount moved of the *primary* (first) token in a
+/// multi-token split; it does not reflect amounts moved of any secondary
+/// tokens. An indexer that needs the full per-token breakdown of the new
+/// child will (`new_id`) must fall back to `get_will`.
 pub fn will_split(env: &Env, original_id: u64, new_id: u64, owner: &Address, split_amount: i128) {
     env.events().publish(
         (symbol_short!("split"), original_id),
