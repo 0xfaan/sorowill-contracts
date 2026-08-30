@@ -670,6 +670,11 @@ impl WillContract {
     /// stored in claimable-shares storage and beneficiaries must call
     /// `claim_share` to withdraw.
     ///
+    /// Splits are computed from `will.beneficiaries` as it stands at the
+    /// moment this call executes, not as it stood when [`trigger_will`] ran —
+    /// see [`renounce_beneficiary`]'s docs for the full interaction with an
+    /// in-progress grace period.
+    ///
     /// # Panics
     /// - [`WillError::WillNotTriggered`] if the will is not `Triggered`.
     /// - [`WillError::GracePeriodNotExpired`] if the grace period has not elapsed yet.
@@ -866,6 +871,28 @@ impl WillContract {
     /// Only callable by a named beneficiary while the will is in `Active` or
     /// `Triggered` status. After renunciation, the will is saved but status
     /// transitions are not recorded (it's a beneficiary action, not a status change).
+    ///
+    /// # Interaction with an in-progress `Triggered` grace period
+    ///
+    /// [`trigger_will`] does not snapshot the beneficiary list: it only flips
+    /// `status` to `Triggered` and records `trigger_time`. `will.beneficiaries`
+    /// therefore stays live storage for the entire grace period, and
+    /// [`release_inheritance`] reads it fresh at release time rather than
+    /// reading whatever the list looked like at the moment of triggering.
+    /// This is intentional — it is what makes it possible for a beneficiary
+    /// to renounce *after* a will has been triggered (during the grace
+    /// period) and still have the payout split adjust for them — but it also
+    /// means the effective split is not finalized until
+    /// [`release_inheritance`] actually runs. Any renunciation submitted
+    /// before that call, including one made moments before release, changes
+    /// every remaining beneficiary's share immediately and irreversibly:
+    /// there is no separate confirmation step, no way to correlate a given
+    /// renunciation to "the trigger cycle it applied to", and no snapshot to
+    /// roll back to. Beneficiaries and owners who need the split to be
+    /// stable once a will is `Triggered` must treat the trigger event itself
+    /// as informational only and rely on the `beneficiary_renounced` event
+    /// stream (correlated by `will_id` and timestamp against `will_triggered`)
+    /// to reconstruct what happened during a given grace period.
     ///
     /// # Parameters
     /// - `will_id`: the will to renounce beneficiary status from
@@ -1724,7 +1751,17 @@ impl WillContract {
     /// `tokens` parameter), a new id, and starts with `Active` status and a
     /// fresh check-in deadline.
     ///
-    /// The source will must be `Active` or `Triggered` (any non-destroyed will).
+    /// The source will must be `Active` or `Triggered`. Cloning is
+    /// deliberately *not* allowed from a `Cancelled`, `Released`, or
+    /// `Settled` source: an owner who let a will resolve to one of those
+    /// terminal states may have done so specifically because the
+    /// beneficiary/guardian configuration no longer reflects their wishes
+    /// (e.g. cancelling because a beneficiary is no longer trusted), and
+    /// silently letting that configuration be reused as a template for a
+    /// brand-new, separately-funded will would be surprising. Callers who
+    /// want to reuse an old configuration from a terminal will must supply
+    /// the beneficiary/guardian lists to [`create_will`] directly, which
+    /// forces a conscious re-entry of the data instead of an implicit copy.
     /// The owner must authorize this call.
     ///
     /// # Parameters
@@ -1738,6 +1775,8 @@ impl WillContract {
     ///
     /// # Panics
     /// - [`WillError::WillNotFound`] if the source will does not exist.
+    /// - [`WillError::WillNotActive`] if the source will is not `Active` or
+    ///   `Triggered`.
     /// - [`WillError::ZeroAmount`] if any token amount is not positive.
     /// - [`WillError::TooManyBeneficiaries`] if the token list is empty or too large.
     /// - [`WillError::FixedAmountExceedsBalance`] if the source's
@@ -1756,6 +1795,9 @@ impl WillContract {
         }
 
         let source = load_will(&env, source_will_id);
+        if source.status != WillStatus::Active && source.status != WillStatus::Triggered {
+            panic_with_error!(&env, WillError::WillNotActive);
+        }
 
         // Build balances map and transfer tokens from the owner.
         let mut balances: Map<Address, i128> = Map::new(&env);
@@ -1844,6 +1886,10 @@ impl WillContract {
     ///
     /// The owner must authorize the entire call. All wills are created under
     /// the same `owner`.
+    ///
+    /// Each will's audit trail is seeded with a `create` transition exactly
+    /// like [`create_will`], so `get_will_history` starts with the same
+    /// entry regardless of which creation path produced the will.
     ///
     /// # Returns
     /// A `Vec<u64>` of newly allocated will ids, one per spec.
@@ -1964,6 +2010,15 @@ impl WillContract {
             storage::index_by_owner(&env, &owner, will_id);
             storage::increment_active_will_count(&env);
 
+            record_transition(
+                &env,
+                will_id,
+                WillStatus::Active,
+                WillStatus::Active,
+                &owner,
+                symbol_short!("create"),
+            );
+
             events::will_created(
                 &env,
                 will_id,
@@ -1984,9 +2039,21 @@ impl WillContract {
     /// this call. This is an owner-initiated per-will migration that allows
     /// users to opt-in to new contract versions without being forced to do so.
     ///
-    /// # Current behavior (v0 → v1)
-    /// Sets the schema_version field to 1. Future versions will implement
-    /// data transformations here.
+    /// # Current behavior is a placeholder
+    /// `CURRENT_SCHEMA_VERSION` is `1`, and every will created by this
+    /// contract version is already stamped with `schema_version:
+    /// CURRENT_SCHEMA_VERSION` at creation time (see [`create_will`] and
+    /// [`batch_create_wills`]). Because of that, `old_version >=
+    /// CURRENT_SCHEMA_VERSION` is true for any will this contract could
+    /// actually produce, so the early return below is taken unconditionally
+    /// and the body never runs in practice — there is no real migration
+    /// wired up yet. The `will.schema_version = CURRENT_SCHEMA_VERSION` line
+    /// and the emitted `will_migrated` event exist only as the scaffold a
+    /// future schema bump will hang real field transformations off of; a
+    /// will could only reach this function with `old_version <
+    /// CURRENT_SCHEMA_VERSION` after a future contract upgrade raises
+    /// `CURRENT_SCHEMA_VERSION` and defines an actual v1 → v2 (or later)
+    /// transformation here.
     ///
     /// # Panics
     /// - [`WillError::NotOwner`] if `owner` does not own `will_id`.
