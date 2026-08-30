@@ -166,6 +166,9 @@ pub struct Will {
     /// When `true`, transfers use `env.transfer()` instead of the token client.
     pub is_native: bool,
     /// The amount of `token` currently locked in the will, in the token's base units.
+    /// A legacy mirror of `balances[token]` kept for backward compatibility;
+    /// every writer that touches the primary token's balance must update both
+    /// fields together until this mirror is fully removed.
     pub balance: i128,
     /// The beneficiaries and their basis-point shares. Always sums to 10,000.
     pub beneficiaries: Vec<Beneficiary>,
